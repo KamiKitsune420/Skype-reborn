@@ -1,0 +1,158 @@
+You are a staff-level software engineer building a production-ready “Skype 7–style” clone in Python.
+
+IMPORTANT CONSTRAINTS
+- Do NOT attempt to implement or reverse-engineer the real proprietary Skype protocol. (It was proprietary/closed and discontinued.) Build our own open protocol inspired by the product experience instead. 
+- The final result must allow me to host the server and chat/call between multiple clients.
+- Implement: accounts, contacts, presence, text chat, offline message sync, voice calls, file transfer, notifications, and a Bot API.
+- Include built-in “Echo / Sound Test Service” (like Skype’s echo service): user calls it, speaks, and hears their audio played back with a short delay; also provide a quick latency/jitter summary.
+- Use wxPython for the desktop GUI.
+- Use asyncio for networking and concurrency.
+- Prefer secure defaults (TLS, password hashing, token auth).
+- Everything must be modular (no giant single-file code). Provide clean folder structure, docs, and scripts to run.
+
+TARGET PLATFORM
+- Windows first, but keep cross-platform where possible.
+
+DELIVERABLES
+1) A monorepo with:
+   - server/ (Python async server)
+   - client/ (wxPython desktop client)
+   - shared/ (protocol types, utils)
+   - bots/ (example bots)
+   - docs/ (architecture, protocol spec, deployment)
+   - scripts/ (dev/run scripts)
+2) A complete step-by-step “How to run” guide:
+   - Create venv, install deps, generate certs, run server, run 2+ clients, test chat/call/echo/bot.
+3) A protocol specification in docs/protocol.md (message types, fields, auth, error codes).
+4) Tests:
+   - unit tests for shared protocol and server logic
+   - integration test that spins server + 2 simulated clients and verifies messaging + presence
+5) Logging/observability:
+   - structured logs (server + client)
+   - basic metrics endpoints (even if minimal)
+
+ARCHITECTURE REQUIREMENTS (DESIGN FIRST, THEN IMPLEMENT)
+Phase A — Design docs (write first)
+- Provide a short architecture overview:
+  - transport: WebSocket over TLS for signaling (auth, chat, presence, call setup)
+  - voice transport: UDP for real-time audio packets (preferred), with fallback to WebSocket if UDP blocked
+  - audio codec: Opus preferred; if Opus install is hard, implement PCM fallback but keep Opus hooks
+  - NAT traversal: simple STUN optional; if too complex, document limitations clearly
+- Data model:
+  - Users, contacts, conversations, messages, attachments, call sessions
+  - Local client cache: sqlite
+  - Server storage: sqlite for dev, pluggable interface for Postgres later
+- Security model:
+  - Password hashing with argon2
+  - JWT access tokens + refresh tokens
+  - TLS for WebSocket and HTTPS endpoints
+  - Optional end-to-end encryption can be stubbed as a future task, but transport encryption must work now
+- Accessibility:
+  - wx controls with good screen reader focus order
+  - keyboard-first navigation
+  - audible notifications using simple sound playback
+- Bot API:
+  - bots connect as normal users OR via a dedicated bot token
+  - bots can subscribe to events (message received, user status, conversation created)
+  - bots can send messages and files
+  - include at least one example bot: /echo, /help, and “status report”
+
+Phase B — Implement in small increments (commit-like steps)
+- Build the shared protocol models first (pydantic or dataclasses):
+  - Envelope {type, id, timestamp, auth, payload}
+  - Standard errors, ack, retry hints
+- Implement server:
+  1) Auth endpoints (register/login/refresh) over HTTPS (FastAPI recommended)
+  2) WebSocket gateway for realtime events
+  3) Presence service (online/away/busy/invisible)
+  4) Chat service (1:1 and group)
+  5) Offline sync: store messages server-side, deliver on reconnect with cursors
+  6) File transfer: chunked upload/download with size limits and resume support
+  7) Call signaling: create call session, invite, accept, hangup
+  8) Voice relay:
+     - UDP audio relay/forwarding between peers (simpler) OR server-mixed conference for groups (optional)
+     - include jitter buffer, sequence numbers, timestamps
+  9) Echo/Sound Test service:
+     - special “echo” contact; calling it returns your audio back to you with a configurable delay (e.g., 300ms)
+     - provide stats: average RTT, jitter estimate, packet loss, audio level (RMS)
+- Implement client (wxPython):
+  - Login screen
+  - Main window: contacts list + presence + conversation list
+  - Chat view: message history, input box, send button, typing indicator
+  - Call UI: call/answer/hang up, status announcements, volume meter
+  - Settings: audio device selection, push-to-talk toggle, notification sounds
+  - Bot UI: add bot contact, show bot capabilities
+  - Echo service visible as a default contact
+- Provide CLI debug tools:
+  - “headless client” to send messages and place calls (helps tests)
+
+ENGINEERING PRACTICES (STRICT)
+- Use type hints everywhere.
+- Use black/ruff formatting + mypy (or pyright) config.
+- Centralized config via pydantic-settings or env vars.
+- Strong error handling: never crash silently; show tracebacks in logs.
+- Use dependency injection for storage layer.
+- Use a clear event-bus pattern inside server.
+- Use asyncio-friendly libraries:
+  - FastAPI + uvicorn for HTTP
+  - websockets OR FastAPI WebSocket for realtime
+  - aiofiles for file IO
+- Keep all secrets out of repo. Provide .env.example.
+
+DEPS (PREFERRED)
+Server:
+- fastapi, uvicorn, websockets (if needed), python-jose or pyjwt, argon2-cffi
+- sqlalchemy (async) + aiosqlite for dev
+- structlog or logging + json formatter
+- prometheus-client (optional minimal metrics)
+
+Client:
+- wxPython
+- httpx for HTTP calls
+- websockets for realtime
+- sounddevice + numpy for audio capture/playback
+- opus bindings if feasible (document installation); else PCM fallback
+
+VOICE PACKET FORMAT
+- header: session_id, seq, timestamp_ms, codec, payload_len
+- payload: opus frame or PCM chunk
+- implement jitter buffer: reorder by seq, play out with small buffer (e.g., 60–120ms)
+
+FILES
+- chunk size: e.g., 256KB
+- verify checksum (sha256)
+- allow resume by chunk index
+- store server-side in uploads/ with metadata in DB
+
+BOTS
+- Bot auth:
+  - bot tokens created by admin CLI command
+  - bots can run as separate python processes using bots/sdk.py
+- Provide bots/sdk.py:
+  - connect_ws(), send_message(), send_file(), on_event() decorator
+- Example bots:
+  - echo bot: repeats messages
+  - help bot: lists commands
+  - diagnostics bot: reports server version, latency, uptime
+
+DELIVERY FORMAT
+- Generate the full repository with all code files.
+- After code generation, output:
+  1) a tree of the repo
+  2) exact commands to set up and run server
+  3) exact commands to run two clients and test:
+     - register 2 users
+     - add each other
+     - chat
+     - call
+     - call echo service
+     - run example bot and interact
+- Provide known limitations and next steps.
+
+START NOW
+Step 1: write docs/architecture.md and docs/protocol.md.
+Step 2: implement shared/ protocol package with tests.
+Step 3: implement server minimal vertical slice (register/login + ws chat).
+Then iterate adding features in the order above.
+note, we have both audio and graphical assets that are ment to be used.
+also, please make a log of you're actions. before you do them, and after you do them. add if it worked or if it failed. add every action in here, related to coding the actuall program

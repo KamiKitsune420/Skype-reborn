@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+argon2-cffi
+pydantic-settings
+httpx
+structlog
+aiofiles
+sqlalchemy
+aiosqlite
+wxasync
+wxPython
+sounddevice
+numpy
+python-jose[cryptography]
+websockets

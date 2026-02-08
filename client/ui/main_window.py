@@ -43,6 +43,7 @@ class MainWindow(wx.Frame):
         self.typing_task = None
         self._is_currently_typing = False
         self._update_timer = None
+        self._selection_task = None
 
     def TriggerUpdate(self):
         # Debounce UI updates to prevent lag during rapid status changes
@@ -319,21 +320,31 @@ class MainWindow(wx.Frame):
             self.UpdateContactList()
 
     def UpdateContactList(self):
-        # Throttle list updates to avoid screen reader lag
-        self.contact_list.Freeze()
-        self.contact_list.Clear()
+        # Only Clear if absolutely necessary or if list length changed significantly
+        # For small lists, simple updates are faster and better for screen readers
+        
+        current_selection = self.contact_list.GetSelection()
+        current_items = self.contact_list.GetStrings()
+        new_items = []
+
         if self.is_searching:
             self.list_label.SetLabel("SEARCH RESULTS")
             for u in self.search_results:
-                self.contact_list.Append(u['display_name'])
+                new_items.append(u['display_name'])
         else:
             # Sort contacts: Online first, then offline
             sorted_contacts = sorted(self.contacts, key=lambda x: (x['status'] != 'ONLINE', x['display_name']))
             self.contacts = sorted_contacts
             for c in self.contacts:
                 status_char = "●" if c['status'] == 'ONLINE' else "○"
-                self.contact_list.Append(f"{status_char} {c['display_name']}")
-        self.contact_list.Thaw()
+                new_items.append(f"{status_char} {c['display_name']}")
+
+        if current_items != new_items:
+            self.contact_list.Freeze()
+            self.contact_list.Set(new_items) # Set is more efficient than Clear + multiple Appends
+            if current_selection != wx.NOT_FOUND and current_selection < len(new_items):
+                self.contact_list.SetSelection(current_selection)
+            self.contact_list.Thaw()
 
     async def OnSearch(self, event):
         query = self.search_ctrl.GetValue().strip()
@@ -353,10 +364,21 @@ class MainWindow(wx.Frame):
             self.UpdateContactList()
 
     async def OnContactSelected(self, event):
+        if self._selection_task:
+            self._selection_task.cancel()
+        
+        async def delayed_select():
+            await asyncio.sleep(0.25) # 250ms debounce
+            await self.DoSelectContact()
+            
+        self._selection_task = asyncio.create_task(delayed_select())
+
+    async def DoSelectContact(self):
         idx = self.contact_list.GetSelection()
         if idx == wx.NOT_FOUND: return
         
         if self.is_searching:
+            if idx >= len(self.search_results): return
             user = self.search_results[idx]
             res = wx.MessageBox(f"Add {user['display_name']} to your contacts?", "Skype™ Reborn", wx.YES_NO)
             if res == wx.YES:
@@ -368,6 +390,7 @@ class MainWindow(wx.Frame):
                     self.UpdateContactList()
             return
 
+        if idx >= len(self.contacts): return
         self.selected_contact = self.contacts[idx]
         self.current_conversation_id = self.selected_contact["id"]
         self.chat_header.SetLabel(f"{self.selected_contact['display_name']}")
@@ -379,8 +402,8 @@ class MainWindow(wx.Frame):
             self.chat_area.Show()
             self.panel.Layout()
             
-        asyncio.create_task(self.LoadMessages())
-        self.message_input.SetFocus()
+        await self.LoadMessages()
+        # Removed message_input.SetFocus() to prevent stealing focus during navigation
 
     async def LoadMessages(self):
         messages = await self.api_client.get_messages(self.current_conversation_id)

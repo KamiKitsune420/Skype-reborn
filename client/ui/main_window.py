@@ -138,7 +138,10 @@ class MainWindow(wx.Frame):
         self.profile_name.SetFont(font)
         
         # Status Dropdown (Simplified)
-        self.status_btn = wx.Button(profile_panel, label="▼", size=(20, 20), style=wx.BU_EXACTFIT)
+        self.status_btn = wx.Button(profile_panel, label="▼", size=(20, 20), style=wx.BU_EXACTFIT, name="Change Status Button")
+        self.status_btn.SetToolTip("Change your online status")
+        # For NVDA, the 'name' parameter usually helps, but we can also set help text
+        self.status_btn.SetHelpText("Click to change your online status (Online, Away, Busy, Invisible)")
         
         profile_text_sizer = wx.BoxSizer(wx.VERTICAL)
         profile_text_sizer.Add(self.profile_name, 0)
@@ -149,8 +152,10 @@ class MainWindow(wx.Frame):
         sidebar_sizer.Add(profile_panel, 0, wx.EXPAND)
         
         # Search Control
+        self.search_label = wx.StaticText(sidebar, label="&Search users", name="Search Label")
         self.search_ctrl = wx.SearchCtrl(sidebar, style=wx.TE_PROCESS_ENTER, name="Global User Search")
         self.search_ctrl.SetDescriptiveText("Search Skype users...")
+        sidebar_sizer.Add(self.search_label, 0, wx.LEFT | wx.RIGHT, 10)
         sidebar_sizer.Add(self.search_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
         
         # Tabs Placeholder (Recent / Contacts)
@@ -214,6 +219,10 @@ class MainWindow(wx.Frame):
         
         self.file_btn = wx.Button(self.input_panel, label="+", size=(30, 30), name="Send File Button")
         input_sizer.Add(self.file_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
+
+        # Message Input Label (Hidden visually but available for NVDA)
+        self.msg_label = wx.StaticText(self.input_panel, label="&Message")
+        input_sizer.Add(self.msg_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 5)
 
         self.message_input = wx.TextCtrl(self.input_panel, style=wx.TE_PROCESS_ENTER | wx.TE_MULTILINE, name="Message Input Box")
         self.message_input.SetHint("Type a message here...")

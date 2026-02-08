@@ -68,7 +68,10 @@
                     <div class="rounded-circle bg-secondary me-3 d-flex align-items-center justify-content-center text-white" style="width: 40px; height: 40px;"><i class="bi bi-person-fill"></i></div>
                     <div class="flex-grow-1">
                         <div id="myUsername" class="fw-bold text-dark"></div>
-                        <div class="small text-success">Online</div>
+                        <div class="d-flex align-items-center">
+                            <div id="myStatusText" class="small text-success me-2">Online</div>
+                            <button id="statusBtn" class="btn btn-sm p-0 border-0 text-primary" title="Change Status" aria-label="Change online status"><i class="bi bi-caret-down-fill" style="font-size: 0.7rem;"></i></button>
+                        </div>
                     </div>
                     <button id="logoutBtn" class="btn btn-sm text-muted"><i class="bi bi-box-arrow-right"></i></button>
                 </div>
@@ -158,6 +161,16 @@
                 await peerConnection.addIceCandidate(new RTCIceCandidate(envelope.payload.data.candidate));
             } else if (envelope.type === "CALL_HANGUP") {
                 endCall();
+            } else if (envelope.type === "PRESENCE_BROADCAST") {
+                const payload = envelope.payload;
+                const contact = contacts.find(c => c.id === payload.user_id);
+                if (contact) {
+                    contact.status = payload.status;
+                    renderContactList(contacts);
+                } else {
+                    // New contact or update we don't have yet
+                    loadContacts();
+                }
             }
         };
     }

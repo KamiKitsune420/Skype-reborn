@@ -5,6 +5,7 @@ import aiofiles
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
@@ -65,6 +66,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Skype Reborn Server", lifespan=lifespan)
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # --- Auth Routes ---
 
 @app.post("/register")
@@ -93,6 +102,17 @@ async def register(payload: RegisterPayload, db: AsyncSession = Depends(get_db))
         if not existing_contact.scalars().first():
             contact = Contact(user_id=user.id, contact_user_id=echo_user.id)
             db.add(contact)
+    
+    await db.commit()
+    
+    # NEW: Also ensure all existing users have echo_service as a contact
+    # This handles the case where users registered before the bot
+    stmt = select(User).where(User.id != user.id)
+    all_users = await db.execute(stmt)
+    for other_user in all_users.scalars().all():
+        exists = await db.execute(select(Contact).where(Contact.user_id == other_user.id, Contact.contact_user_id == user.id))
+        if not exists.scalars().first():
+            db.add(Contact(user_id=other_user.id, contact_user_id=user.id))
     
     await db.commit()
     return {"message": "User registered successfully"}

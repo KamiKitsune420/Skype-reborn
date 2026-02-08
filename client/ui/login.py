@@ -37,11 +37,16 @@ class LoginFrame(wx.Frame):
         login_fgs = wx.FlexGridSizer(2, 2, 10, 25)
         self.user_label = wx.StaticText(self.login_view, label="&Skype Name", name="Skype Name Label")
         self.user_ctrl = wx.TextCtrl(self.login_view, name="Skype Name Input")
+        
         self.pass_label = wx.StaticText(self.login_view, label="&Password", name="Password Label")
         self.pass_ctrl = wx.TextCtrl(self.login_view, style=wx.TE_PASSWORD, name="Password Input")
         
-        login_fgs.AddMany([(self.user_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.user_ctrl, 1, wx.EXPAND),
-                          (self.pass_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.pass_ctrl, 1, wx.EXPAND)])
+        # FlexGridSizer association: Label then Control
+        login_fgs.Add(self.user_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        login_fgs.Add(self.user_ctrl, 1, wx.EXPAND)
+        login_fgs.Add(self.pass_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        login_fgs.Add(self.pass_ctrl, 1, wx.EXPAND)
+        
         login_fgs.AddGrowableCol(1, 1)
         login_vbox.Add(login_fgs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 30)
         
@@ -64,25 +69,31 @@ class LoginFrame(wx.Frame):
         reg_vbox = wx.BoxSizer(wx.VERTICAL)
         reg_fgs = wx.FlexGridSizer(5, 2, 10, 25)
         
-        self.reg_user = wx.TextCtrl(self.register_view, name="Registration Skype Name Input")
-        self.reg_pass = wx.TextCtrl(self.register_view, style=wx.TE_PASSWORD, name="Registration Password Input")
-        self.reg_email = wx.TextCtrl(self.register_view, name="Registration Email Input")
-        self.reg_fname = wx.TextCtrl(self.register_view, name="Registration First Name Input")
-        self.reg_lname = wx.TextCtrl(self.register_view, name="Registration Last Name Input")
+        self.reg_user_label = wx.StaticText(self.register_view, label="&Skype Name")
+        self.reg_user = wx.TextCtrl(self.register_view, name="Reg Skype Name")
         
-        self.reg_user_label = wx.StaticText(self.register_view, label="&Skype Name", name="Reg User Label")
-        self.reg_pass_label = wx.StaticText(self.register_view, label="&Password", name="Reg Pass Label")
-        self.reg_email_label = wx.StaticText(self.register_view, label="&Email", name="Reg Email Label")
-        self.reg_fname_label = wx.StaticText(self.register_view, label="&First Name", name="Reg FName Label")
-        self.reg_lname_label = wx.StaticText(self.register_view, label="&Last Name", name="Reg LName Label")
+        self.reg_pass_label = wx.StaticText(self.register_view, label="&Password")
+        self.reg_pass = wx.TextCtrl(self.register_view, style=wx.TE_PASSWORD, name="Reg Password")
+        
+        self.reg_email_label = wx.StaticText(self.register_view, label="&Email")
+        self.reg_email = wx.TextCtrl(self.register_view, name="Reg Email")
+        
+        self.reg_fname_label = wx.StaticText(self.register_view, label="&First Name")
+        self.reg_fname = wx.TextCtrl(self.register_view, name="Reg First Name")
+        
+        self.reg_lname_label = wx.StaticText(self.register_view, label="&Last Name")
+        self.reg_lname = wx.TextCtrl(self.register_view, name="Reg Last Name")
 
-        reg_fgs.AddMany([
-            (self.reg_user_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_user, 1, wx.EXPAND),
-            (self.reg_pass_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_pass, 1, wx.EXPAND),
-            (self.reg_email_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_email, 1, wx.EXPAND),
-            (self.reg_fname_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_fname, 1, wx.EXPAND),
-            (self.reg_lname_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_lname, 1, wx.EXPAND)
-        ])
+        reg_fgs.Add(self.reg_user_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        reg_fgs.Add(self.reg_user, 1, wx.EXPAND)
+        reg_fgs.Add(self.reg_pass_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        reg_fgs.Add(self.reg_pass, 1, wx.EXPAND)
+        reg_fgs.Add(self.reg_email_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        reg_fgs.Add(self.reg_email, 1, wx.EXPAND)
+        reg_fgs.Add(self.reg_fname_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        reg_fgs.Add(self.reg_fname, 1, wx.EXPAND)
+        reg_fgs.Add(self.reg_lname_label, 0, wx.ALIGN_CENTER_VERTICAL)
+        reg_fgs.Add(self.reg_lname, 1, wx.EXPAND)
         reg_fgs.AddGrowableCol(1, 1)
         reg_vbox.Add(reg_fgs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 30)
         

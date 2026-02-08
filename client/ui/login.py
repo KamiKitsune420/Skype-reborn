@@ -60,29 +60,35 @@ class LoginFrame(wx.Frame):
         self.main_vbox.Add(self.login_view, 1, wx.EXPAND)
 
         # --- Register View Container ---
-        self.register_view = wx.Panel(self.panel)
+        self.register_view = wx.Panel(self.panel, name="Registration View")
         reg_vbox = wx.BoxSizer(wx.VERTICAL)
         reg_fgs = wx.FlexGridSizer(5, 2, 10, 25)
         
-        self.reg_user = wx.TextCtrl(self.register_view, name="Reg User")
-        self.reg_pass = wx.TextCtrl(self.register_view, style=wx.TE_PASSWORD)
-        self.reg_email = wx.TextCtrl(self.register_view)
-        self.reg_fname = wx.TextCtrl(self.register_view)
-        self.reg_lname = wx.TextCtrl(self.register_view)
+        self.reg_user = wx.TextCtrl(self.register_view, name="Registration Skype Name Input")
+        self.reg_pass = wx.TextCtrl(self.register_view, style=wx.TE_PASSWORD, name="Registration Password Input")
+        self.reg_email = wx.TextCtrl(self.register_view, name="Registration Email Input")
+        self.reg_fname = wx.TextCtrl(self.register_view, name="Registration First Name Input")
+        self.reg_lname = wx.TextCtrl(self.register_view, name="Registration Last Name Input")
         
+        self.reg_user_label = wx.StaticText(self.register_view, label="&Skype Name", name="Reg User Label")
+        self.reg_pass_label = wx.StaticText(self.register_view, label="&Password", name="Reg Pass Label")
+        self.reg_email_label = wx.StaticText(self.register_view, label="&Email", name="Reg Email Label")
+        self.reg_fname_label = wx.StaticText(self.register_view, label="&First Name", name="Reg FName Label")
+        self.reg_lname_label = wx.StaticText(self.register_view, label="&Last Name", name="Reg LName Label")
+
         reg_fgs.AddMany([
-            (wx.StaticText(self.register_view, label="Skype Name"), 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_user, 1, wx.EXPAND),
-            (wx.StaticText(self.register_view, label="Password"), 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_pass, 1, wx.EXPAND),
-            (wx.StaticText(self.register_view, label="Email"), 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_email, 1, wx.EXPAND),
-            (wx.StaticText(self.register_view, label="First Name"), 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_fname, 1, wx.EXPAND),
-            (wx.StaticText(self.register_view, label="Last Name"), 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_lname, 1, wx.EXPAND)
+            (self.reg_user_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_user, 1, wx.EXPAND),
+            (self.reg_pass_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_pass, 1, wx.EXPAND),
+            (self.reg_email_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_email, 1, wx.EXPAND),
+            (self.reg_fname_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_fname, 1, wx.EXPAND),
+            (self.reg_lname_label, 0, wx.ALIGN_CENTER_VERTICAL), (self.reg_lname, 1, wx.EXPAND)
         ])
         reg_fgs.AddGrowableCol(1, 1)
         reg_vbox.Add(reg_fgs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 30)
         
         reg_btn_box = wx.BoxSizer(wx.HORIZONTAL)
-        self.do_reg_btn = wx.Button(self.register_view, label="&Register", size=(100, 35))
-        self.back_btn = wx.Button(self.register_view, label="&Back", size=(100, 35))
+        self.do_reg_btn = wx.Button(self.register_view, label="&Register", size=(100, 35), name="Register Action Button")
+        self.back_btn = wx.Button(self.register_view, label="&Back", size=(100, 35), name="Back to Login Button")
         reg_btn_box.Add(self.back_btn, 0, wx.RIGHT, 15)
         reg_btn_box.Add(self.do_reg_btn, 0)
         reg_vbox.Add(reg_btn_box, 0, wx.ALIGN_CENTER | wx.BOTTOM, 25)

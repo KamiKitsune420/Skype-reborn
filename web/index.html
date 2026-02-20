@@ -108,8 +108,12 @@
 <audio id="remoteAudio" autoplay></audio>
 
 <script>
-    const API_URL = "http://127.0.0.1:8000";
-    const WS_URL = "ws://127.0.0.1:8000";
+    // Derive server URLs from the page's own host so the web client works
+    // when accessed from any machine (localhost, LAN IP, or remote server).
+    const _host = window.location.hostname || '127.0.0.1';
+    const _https = window.location.protocol === 'https:';
+    const API_URL = `${_https ? 'https' : 'http'}://${_host}:8000`;
+    const WS_URL  = `${_https ? 'wss'   : 'ws'}://${_host}:8000`;
     let token = null, userId = null, ws = null, selectedContactId = null, contacts = [];
     let peerConnection = null, localStream = null;
 

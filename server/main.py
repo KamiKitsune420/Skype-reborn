@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 import aiofiles
 from contextlib import asynccontextmanager
@@ -9,7 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
-from .database import get_db, init_db, User, Message as DBMessage, Contact, SessionLocal
+from uuid import uuid4
+from .database import get_db, init_db, User, Message as DBMessage, Contact, FileTransfer, SessionLocal
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .voice_relay import start_voice_relay
 from .manager import manager
@@ -68,7 +68,7 @@ app = FastAPI(title="Skype Reborn Server", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -168,7 +168,18 @@ async def add_contact(payload: ContactAddPayload, current_user: User = Depends(g
 
 @app.get("/messages/{conversation_id}")
 async def get_messages(conversation_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    # In a real app, we should check if current_user is part of conversation_id
+    # Only allow access if the requesting user is a participant in this conversation.
+    # conversation_id is the other user's ID; verify a contact relationship exists.
+    if current_user.id != conversation_id:
+        contact_check = await db.execute(
+            select(Contact).where(
+                Contact.user_id == current_user.id,
+                Contact.contact_user_id == conversation_id,
+            )
+        )
+        if not contact_check.scalars().first():
+            raise HTTPException(status_code=403, detail="Access denied")
+
     stmt = select(DBMessage).where(DBMessage.conversation_id == conversation_id).order_by(DBMessage.timestamp.asc())
     result = await db.execute(stmt)
     messages = result.scalars().all()
@@ -197,6 +208,8 @@ async def upload_file(recipient_id: str, filename: str, file: UploadFile = File(
     file_path = os.path.join(settings.UPLOAD_DIR, file_id)
     
     content = await file.read()
+    if len(content) > settings.MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=413, detail="File too large")
     async with aiofiles.open(file_path, "wb") as f:
         await f.write(content)
     

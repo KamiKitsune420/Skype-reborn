@@ -1,304 +1,380 @@
+"""Main chat window.
+
+Architecture: pure wx on the main thread.  All network I/O runs in a
+ThreadPoolExecutor (API calls) or the WSClient daemon thread (WebSocket).
+Results are pushed back to the main thread exclusively via wx.CallAfter,
+so there is zero asyncio/await anywhere in this file.
+
+Navigation is instant: OnContactSelected updates the header and shows a
+"Loading…" placeholder synchronously in the event handler, then fires a
+background task to fetch messages.  A monotonically-increasing _load_seq
+counter lets the callback discard results that arrived after the user
+already moved to a different contact.
+"""
+
 import wx
 import wx.adv
 import os
-import asyncio
-from wxasync import AsyncBind
+import threading
+import structlog
+from concurrent.futures import ThreadPoolExecutor
+from uuid import UUID, uuid4
+
 from ..network.api_client import APIClient
 from ..network.ws_client import WSClient
-from shared.models import Envelope, MessageType, ChatMessagePayload, CallSignalPayload, ChatTypingPayload
-from uuid import UUID, uuid4
+from shared.models import (
+    Envelope, MessageType,
+    ChatMessagePayload, CallSignalPayload,
+    ChatTypingPayload, PresenceUpdatePayload,
+)
+
+logger = structlog.get_logger()
+
 
 class MainWindow(wx.Frame):
     def __init__(self, api_client: APIClient, ws_client: WSClient, user_data: dict):
-        super().__init__(None, title=f"Skype™ Reborn - {user_data.get('username', 'User')}", 
-                         size=(1000, 700), name="Skype Main Window")
+        super().__init__(
+            None,
+            title=f"Skype™ Reborn — {user_data.get('username', 'User')}",
+            size=(1000, 700),
+            name="Skype Main Window",
+        )
         self.api_client = api_client
         self.ws_client = ws_client
         self.user_data = user_data
-        
-        self.contacts = [] 
-        self.search_results = []
+
+        self.contacts: list = []
+        self.search_results: list = []
         self.is_searching = False
-        self.selected_contact = None 
-        self.current_conversation_id = None
-        
-        # Audio
+        self.selected_contact: dict | None = None
+        self.current_conversation_id: str | None = None
+
         from ..audio.engine import AudioEngine
         from ..network.udp_client import UDPClient
         self.audio_engine = AudioEngine()
         self.udp_client = UDPClient("127.0.0.1", 9000)
         self.is_calling = False
-        self.active_session_id = None
+        self.active_session_id: UUID | None = None
         self.looping_sound = None
 
-        self.InitUI()
+        # Thread pool for API calls (contacts, messages, search, upload)
+        self._pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="api")
+
+        # Monotonic counters — background tasks check these to discard stale results
+        self._load_seq = 0
+        self._search_seq = 0
+
+        # Typing indicator state
+        self._is_typing = False
+        self._typing_timer: wx.CallLater | None = None
+
+        # Window-alive guard: prevents wx.CallAfter callbacks from touching
+        # UI controls after the window has been destroyed
+        self._alive = True
+
+        # Register WS callbacks before connect() is called in app.py
+        self.ws_client.on_message_callback = self.on_ws_message
+        self.ws_client.on_disconnect_callback = self.on_ws_disconnect
+
+        self._build_ui()
         self.CreateMenus()
         self.Centre()
-        
-        # Accelerators (Hotkeys)
         self.SetupShortcuts()
 
-        self.ws_client.on_message_callback = self.on_ws_message
-        asyncio.create_task(self.LoadContacts())
-        self.typing_task = None
-        self._is_currently_typing = False
-        self._update_timer = None
-        self._selection_task = None
+        # Load contacts immediately in background
+        self._pool.submit(self._bg_load_contacts)
 
-    def TriggerUpdate(self):
-        # Debounce UI updates to prevent lag during rapid status changes
-        if self._update_timer:
-            self._update_timer.cancel()
-        
-        async def do_update():
-            await asyncio.sleep(0.5)
-            self.UpdateContactList()
-            
-        self._update_timer = asyncio.create_task(do_update())
+    # ── Shortcuts ────────────────────────────────────────────────────
 
     def SetupShortcuts(self):
         ID_ANSWER = wx.NewIdRef()
         ID_HANGUP = wx.NewIdRef()
-        ID_SEARCH_FOCUS = wx.NewIdRef()
+        ID_SEARCH = wx.NewIdRef()
         ID_RECENTS = wx.NewIdRef()
         ID_CONTACTS = wx.NewIdRef()
-        
-        self.Bind(wx.EVT_MENU, self.OnGlobalAnswer, id=ID_ANSWER)
-        self.Bind(wx.EVT_MENU, self.OnGlobalHangUp, id=ID_HANGUP)
-        self.Bind(wx.EVT_MENU, lambda e: self.search_ctrl.SetFocus(), id=ID_SEARCH_FOCUS)
+
+        self.Bind(wx.EVT_MENU, lambda e: self._answer_if_ringing(), id=ID_ANSWER)
+        self.Bind(wx.EVT_MENU, lambda e: self.HangUp() if self.is_calling else None, id=ID_HANGUP)
+        self.Bind(wx.EVT_MENU, lambda e: self.search_ctrl.SetFocus(), id=ID_SEARCH)
         self.Bind(wx.EVT_MENU, lambda e: self.OnRecentsFocus(e), id=ID_RECENTS)
         self.Bind(wx.EVT_MENU, lambda e: self.OnContactsFocus(e), id=ID_CONTACTS)
 
-        accel_tbl = wx.AcceleratorTable([
-            (wx.ACCEL_ALT, wx.WXK_PAGEUP, ID_ANSWER),
-            (wx.ACCEL_ALT, wx.WXK_PAGEDOWN, ID_HANGUP),
-            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord('S'), ID_SEARCH_FOCUS),
-            (wx.ACCEL_ALT, ord('1'), ID_RECENTS),
-            (wx.ACCEL_ALT, ord('2'), ID_CONTACTS),
-            (wx.ACCEL_CTRL, ord(','), wx.ID_PREFERENCES),
-        ])
-        self.SetAcceleratorTable(accel_tbl)
+        self.SetAcceleratorTable(wx.AcceleratorTable([
+            (wx.ACCEL_ALT, wx.WXK_PAGEUP,              ID_ANSWER),
+            (wx.ACCEL_ALT, wx.WXK_PAGEDOWN,            ID_HANGUP),
+            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord('S'), ID_SEARCH),
+            (wx.ACCEL_ALT, ord('1'),                   ID_RECENTS),
+            (wx.ACCEL_ALT, ord('2'),                   ID_CONTACTS),
+            (wx.ACCEL_CTRL, ord(','),                  wx.ID_PREFERENCES),
+        ]))
+
+    def _answer_if_ringing(self):
+        if hasattr(self, '_incoming_call'):
+            self.AnswerCall(self._incoming_call)
+
+    # ── Menus ────────────────────────────────────────────────────────
 
     def CreateMenus(self):
-        menubar = wx.MenuBar()
-        
-        skype_menu = wx.Menu()
-        skype_menu.Append(wx.ID_ANY, "Online &Status")
-        skype_menu.Append(wx.ID_PREFERENCES, "S&ettings...\tCtrl+,")
-        skype_menu.AppendSeparator()
-        skype_menu.Append(wx.ID_EXIT, "E&xit")
-        
-        contacts_menu = wx.Menu()
-        contacts_menu.Append(wx.ID_ANY, "&Add Contact...")
-        contacts_menu.Append(wx.ID_ANY, "&Search for Skype Users...\tCtrl+Shift+S")
-        
-        conversation_menu = wx.Menu()
-        conversation_menu.Append(wx.ID_ANY, "&Send File...\tCtrl+Shift+F")
-        conversation_menu.Append(wx.ID_ANY, "&Take Snapshot\tCtrl+S")
-        
-        call_menu = wx.Menu()
-        call_menu.Append(wx.ID_ANY, "&Call\tAlt+C")
-        call_menu.Append(wx.ID_ANY, "&Hang Up\tAlt+H")
-        
-        help_menu = wx.Menu()
-        help_menu.Append(wx.ID_HELP, "&Help Topics\tCtrl+H")
-        help_menu.Append(wx.ID_ABOUT, "&About Skype Reborn")
-        
-        menubar.Append(skype_menu, "&Skype")
-        menubar.Append(contacts_menu, "&Contacts")
-        menubar.Append(conversation_menu, "Con&versation")
-        menubar.Append(call_menu, "Ca&ll")
-        menubar.Append(help_menu, "&Help")
-        
-        self.SetMenuBar(menubar)
+        bar = wx.MenuBar()
+
+        skype = wx.Menu()
+        skype.Append(wx.ID_ANY, "Online &Status")
+        skype.Append(wx.ID_PREFERENCES, "S&ettings…\tCtrl+,")
+        skype.AppendSeparator()
+        skype.Append(wx.ID_EXIT, "E&xit")
+
+        contacts = wx.Menu()
+        contacts.Append(wx.ID_ANY, "&Add Contact…")
+        contacts.Append(wx.ID_ANY, "&Search for Skype Users…\tCtrl+Shift+S")
+
+        convo = wx.Menu()
+        convo.Append(wx.ID_ANY, "&Send File…\tCtrl+Shift+F")
+
+        call = wx.Menu()
+        call.Append(wx.ID_ANY, "&Call\tAlt+C")
+        call.Append(wx.ID_ANY, "&Hang Up\tAlt+H")
+
+        help_ = wx.Menu()
+        help_.Append(wx.ID_HELP, "&Help Topics\tCtrl+H")
+        help_.Append(wx.ID_ABOUT, "&About Skype Reborn")
+
+        bar.Append(skype,    "&Skype")
+        bar.Append(contacts, "&Contacts")
+        bar.Append(convo,    "Con&versation")
+        bar.Append(call,     "Ca&ll")
+        bar.Append(help_,    "&Help")
+
+        self.SetMenuBar(bar)
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), id=wx.ID_EXIT)
 
-    def InitUI(self):
-        self.panel = wx.Panel(self, name="Main Panel")
-        self.main_sizer = wx.BoxSizer(wx.HORIZONTAL)
+    # ── Layout ───────────────────────────────────────────────────────
 
-        # Left Sidebar
-        sidebar = wx.Panel(self.panel, size=(300, -1), style=wx.BORDER_NONE, name="Sidebar Panel")
-        sidebar.SetBackgroundColour(wx.Colour(255, 255, 255))
-        sidebar_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Profile Section
-        profile_panel = wx.Panel(sidebar, name="Profile Panel")
-        profile_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        avatar_path = os.path.join("assets", "images", "profile_anonymous.png")
-        if os.path.exists(avatar_path):
-            img = wx.Image(avatar_path, wx.BITMAP_TYPE_ANY).Scale(48, 48, wx.IMAGE_QUALITY_HIGH)
-            sbmp = wx.StaticBitmap(profile_panel, -1, wx.Bitmap(img), name="My Avatar")
-            profile_sizer.Add(sbmp, 0, wx.ALL, 15)
-        
-        self.profile_name = wx.StaticText(profile_panel, label=self.user_data.get("username", "User"), name="My Profile Name")
-        font = self.profile_name.GetFont()
-        font.SetPointSize(11)
-        font.SetWeight(wx.FONTWEIGHT_BOLD)
-        self.profile_name.SetFont(font)
-        
-        # Status Dropdown (Simplified)
-        self.status_btn = wx.Button(profile_panel, label="▼", size=(20, 20), style=wx.BU_EXACTFIT, name="Change Status Button")
+    def _build_ui(self):
+        self.panel = wx.Panel(self, name="Main Panel")
+        root = wx.BoxSizer(wx.HORIZONTAL)
+
+        # ── Sidebar ──────────────────────────────────────────────────
+        sidebar = wx.Panel(self.panel, size=(300, -1), style=wx.BORDER_NONE,
+                           name="Sidebar Panel")
+        sidebar.SetBackgroundColour(wx.Colour(245, 245, 245))
+        sb = wx.BoxSizer(wx.VERTICAL)
+
+        # Profile bar
+        prof = wx.Panel(sidebar, name="Profile Panel")
+        prof.SetBackgroundColour(wx.Colour(0, 114, 198))
+        prof_row = wx.BoxSizer(wx.HORIZONTAL)
+
+        avatar = os.path.join("assets", "images", "profile_anonymous.png")
+        if os.path.exists(avatar):
+            img = wx.Image(avatar, wx.BITMAP_TYPE_ANY).Scale(40, 40, wx.IMAGE_QUALITY_HIGH)
+            prof_row.Add(wx.StaticBitmap(prof, -1, wx.Bitmap(img), name="My Avatar"),
+                         0, wx.ALL, 8)
+
+        self.profile_name = wx.StaticText(
+            prof, label=self.user_data.get("username", "User"), name="My Profile Name"
+        )
+        f = self.profile_name.GetFont()
+        f.SetPointSize(10)
+        f.SetWeight(wx.FONTWEIGHT_BOLD)
+        self.profile_name.SetFont(f)
+        self.profile_name.SetForegroundColour(wx.WHITE)
+
+        self.status_btn = wx.Button(prof, label="▼", size=(22, 22),
+                                     style=wx.BU_EXACTFIT, name="Change Status Button")
         self.status_btn.SetToolTip("Change your online status")
-        # For NVDA, the 'name' parameter usually helps, but we can also set help text
-        self.status_btn.SetHelpText("Click to change your online status (Online, Away, Busy, Invisible)")
-        
-        profile_text_sizer = wx.BoxSizer(wx.VERTICAL)
-        profile_text_sizer.Add(self.profile_name, 0)
-        
-        profile_sizer.Add(profile_text_sizer, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 5)
-        profile_sizer.Add(self.status_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 15)
-        profile_panel.SetSizer(profile_sizer)
-        sidebar_sizer.Add(profile_panel, 0, wx.EXPAND)
-        
-        # Search Control
+
+        prof_row.Add(self.profile_name, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+        prof_row.Add(self.status_btn,   0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+        prof.SetSizer(prof_row)
+        sb.Add(prof, 0, wx.EXPAND)
+
+        # Search
         self.search_label = wx.StaticText(sidebar, label="&Search users", name="Search Label")
-        self.search_ctrl = wx.SearchCtrl(sidebar, style=wx.TE_PROCESS_ENTER, name="Global User Search")
-        self.search_ctrl.SetDescriptiveText("Search Skype users...")
-        sidebar_sizer.Add(self.search_label, 0, wx.LEFT | wx.RIGHT, 10)
-        sidebar_sizer.Add(self.search_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 10)
-        
-        # Tabs Placeholder (Recent / Contacts)
-        self.tab_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.recents_btn = wx.Button(sidebar, label="&Recent", style=wx.BU_EXACTFIT | wx.BORDER_NONE, name="Recent Chats Tab")
-        self.contacts_btn = wx.Button(sidebar, label="&Contacts", style=wx.BU_EXACTFIT | wx.BORDER_NONE, name="Contacts List Tab")
-        self.tab_sizer.Add(self.recents_btn, 1, wx.EXPAND)
-        self.tab_sizer.Add(self.contacts_btn, 1, wx.EXPAND)
-        sidebar_sizer.Add(self.tab_sizer, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
-        
+        self.search_ctrl = wx.SearchCtrl(sidebar, style=wx.TE_PROCESS_ENTER,
+                                          name="Global User Search")
+        self.search_ctrl.SetDescriptiveText("Search Skype users…")
+        sb.Add(self.search_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        sb.Add(self.search_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+
+        # Tabs
+        tabs = wx.BoxSizer(wx.HORIZONTAL)
+        self.recents_btn = wx.Button(sidebar, label="&Recent",
+                                      style=wx.BU_EXACTFIT | wx.BORDER_NONE,
+                                      name="Recent Chats Tab")
+        self.contacts_btn = wx.Button(sidebar, label="&Contacts",
+                                       style=wx.BU_EXACTFIT | wx.BORDER_NONE,
+                                       name="Contacts List Tab")
+        tabs.Add(self.recents_btn, 1, wx.EXPAND)
+        tabs.Add(self.contacts_btn, 1, wx.EXPAND)
+        sb.Add(tabs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
         self.list_label = wx.StaticText(sidebar, label="CONTACTS", name="List Header Label")
-        self.list_label.SetForegroundColour(wx.Colour(120, 120, 120))
-        sidebar_sizer.Add(self.list_label, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 10)
-        
-        # Optimized ListBox
-        self.contact_list = wx.ListBox(sidebar, style=wx.LB_SINGLE | wx.BORDER_NONE, name="Contact and Search List")
-        self.contact_list.SetBackgroundColour(wx.WHITE)
-        sidebar_sizer.Add(self.contact_list, 1, wx.EXPAND)
-        
-        sidebar.SetSizer(sidebar_sizer)
-        self.main_sizer.Add(sidebar, 0, wx.EXPAND)
-        
-        # Right Area (Chat)
+        self.list_label.SetForegroundColour(wx.Colour(100, 100, 100))
+        lf = self.list_label.GetFont()
+        lf.SetPointSize(8)
+        self.list_label.SetFont(lf)
+        sb.Add(self.list_label, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 8)
+
+        self.contact_list = wx.ListBox(sidebar, style=wx.LB_SINGLE | wx.BORDER_NONE,
+                                        name="Contact and Search List")
+        self.contact_list.SetBackgroundColour(wx.Colour(245, 245, 245))
+        sb.Add(self.contact_list, 1, wx.EXPAND)
+
+        sidebar.SetSizer(sb)
+        root.Add(sidebar, 0, wx.EXPAND)
+
+        # ── Chat area ────────────────────────────────────────────────
         self.chat_area = wx.Panel(self.panel, name="Conversation Panel")
         self.chat_area.SetBackgroundColour(wx.WHITE)
-        chat_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Chat Header
+        ca = wx.BoxSizer(wx.VERTICAL)
+
+        # Header
         self.header_panel = wx.Panel(self.chat_area, name="Conversation Header")
         self.header_panel.SetBackgroundColour(wx.Colour(250, 250, 250))
-        header_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.chat_header = wx.StaticText(self.header_panel, label="Welcome to Skype™", name="Active Chat Contact Name")
-        self.chat_header.SetFont(font)
-        header_sizer.Add(self.chat_header, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 20)
-        
-        self.typing_status = wx.StaticText(self.header_panel, label="", name="Typing Notification")
+        hdr = wx.BoxSizer(wx.HORIZONTAL)
+        hdr_font = wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD)
+
+        self.chat_header = wx.StaticText(self.header_panel, label="Welcome to Skype™",
+                                          name="Active Chat Contact Name")
+        self.chat_header.SetFont(hdr_font)
+        hdr.Add(self.chat_header, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 14)
+
+        self.typing_status = wx.StaticText(self.header_panel, label="",
+                                            name="Typing Notification")
         self.typing_status.SetForegroundColour(wx.Colour(128, 128, 128))
-        header_sizer.Add(self.typing_status, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 20)
-        self.header_panel.SetSizer(header_sizer)
-        chat_sizer.Add(self.header_panel, 0, wx.EXPAND)
-        
-        # Message History
-        self.message_history = wx.TextCtrl(self.chat_area, style=wx.TE_MULTILINE | wx.TE_READONLY | wx.TE_RICH2 | wx.BORDER_NONE, name="Chat Message History")
-        chat_sizer.Add(self.message_history, 1, wx.EXPAND | wx.ALL, 5)
-        
-        # Call Panel (Hidden by default)
+        hdr.Add(self.typing_status, 0, wx.RIGHT | wx.ALIGN_CENTER_VERTICAL, 14)
+
+        self.header_panel.SetSizer(hdr)
+        ca.Add(self.header_panel, 0, wx.EXPAND)
+
+        # Message history — plain multiline, fastest rendering on Windows
+        self.message_history = wx.TextCtrl(
+            self.chat_area,
+            style=wx.TE_MULTILINE | wx.TE_READONLY | wx.BORDER_NONE,
+            name="Chat Message History",
+        )
+        ca.Add(self.message_history, 1, wx.EXPAND | wx.ALL, 4)
+
+        # Call panel
         self.call_panel = wx.Panel(self.chat_area, name="In-Call Status Panel")
-        self.call_panel.SetBackgroundColour(wx.Colour(0, 175, 240)) # Skype Blue
-        call_psizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.call_status_text = wx.StaticText(self.call_panel, label="Calling...", style=wx.ALIGN_CENTER)
+        self.call_panel.SetBackgroundColour(wx.Colour(0, 175, 240))
+        cp = wx.BoxSizer(wx.HORIZONTAL)
+        self.call_status_text = wx.StaticText(self.call_panel, label="Calling…",
+                                               style=wx.ALIGN_CENTER)
         self.call_status_text.SetForegroundColour(wx.WHITE)
-        self.call_status_text.SetFont(font)
-        call_psizer.Add(self.call_status_text, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
-        self.call_panel.SetSizer(call_psizer)
-        chat_sizer.Add(self.call_panel, 0, wx.EXPAND)
+        self.call_status_text.SetFont(hdr_font)
+        cp.Add(self.call_status_text, 1, wx.ALL | wx.ALIGN_CENTER_VERTICAL, 10)
+        self.call_panel.SetSizer(cp)
+        ca.Add(self.call_panel, 0, wx.EXPAND)
         self.call_panel.Hide()
 
-        # Input Area
+        # Input
         self.input_panel = wx.Panel(self.chat_area, name="Message Entry Area")
-        input_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        
-        self.file_btn = wx.Button(self.input_panel, label="+", size=(30, 30), name="Send File Button")
-        input_sizer.Add(self.file_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 10)
+        inp = wx.BoxSizer(wx.HORIZONTAL)
 
-        # Message Input Label (Hidden visually but available for NVDA)
-        self.msg_label = wx.StaticText(self.input_panel, label="&Message")
-        input_sizer.Add(self.msg_label, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 5)
+        self.file_btn = wx.Button(self.input_panel, label="+", size=(30, 30),
+                                   name="Send File Button")
+        inp.Add(self.file_btn, 0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
 
-        self.message_input = wx.TextCtrl(self.input_panel, style=wx.TE_PROCESS_ENTER | wx.TE_MULTILINE, name="Message Input Box")
-        self.message_input.SetHint("Type a message here...")
-        input_sizer.Add(self.message_input, 1, wx.EXPAND | wx.ALL, 10)
-        
-        self.btn_sizer = wx.BoxSizer(wx.VERTICAL)
+        inp.Add(wx.StaticText(self.input_panel, label="&Message"),
+                0, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
+
+        self.message_input = wx.TextCtrl(
+            self.input_panel,
+            style=wx.TE_PROCESS_ENTER | wx.TE_MULTILINE,
+            name="Message Input Box",
+        )
+        self.message_input.SetHint("Type a message here…")
+        inp.Add(self.message_input, 1, wx.EXPAND | wx.ALL, 8)
+
+        btns = wx.BoxSizer(wx.VERTICAL)
         self.send_btn = wx.Button(self.input_panel, label="&Send", name="Send Message Button")
         self.call_btn = wx.Button(self.input_panel, label="&Call", name="Start Voice Call Button")
-        self.btn_sizer.Add(self.send_btn, 0, wx.BOTTOM, 5)
-        self.btn_sizer.Add(self.call_btn, 0)
-        input_sizer.Add(self.btn_sizer, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
-        
-        self.input_panel.SetSizer(input_sizer)
-        chat_sizer.Add(self.input_panel, 0, wx.EXPAND)
-        
-        self.chat_area.SetSizer(chat_sizer)
-        self.main_sizer.Add(self.chat_area, 1, wx.EXPAND)
-        
-        # Default State: Hide Conversation
+        btns.Add(self.send_btn, 0, wx.BOTTOM, 4)
+        btns.Add(self.call_btn)
+        inp.Add(btns, 0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
+
+        self.input_panel.SetSizer(inp)
+        ca.Add(self.input_panel, 0, wx.EXPAND)
+
+        self.chat_area.SetSizer(ca)
+        root.Add(self.chat_area, 1, wx.EXPAND)
+
         self.chat_area.Hide()
-        
-        self.panel.SetSizer(self.main_sizer)
+        self.panel.SetSizer(root)
+
+        # Timers
+        self._call_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self._on_call_timeout, self._call_timer)
+
+        self._presence_timer = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, lambda e: self.UpdateContactList(), self._presence_timer)
 
         # Bindings
-        AsyncBind(wx.EVT_BUTTON, self.OnSend, self.send_btn)
-        AsyncBind(wx.EVT_BUTTON, self.OnCall, self.call_btn)
-        AsyncBind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.OnSearch, self.search_ctrl)
-        AsyncBind(wx.EVT_TEXT_ENTER, self.OnSearch, self.search_ctrl)
+        self.send_btn.Bind(wx.EVT_BUTTON, self.OnSend)
+        self.call_btn.Bind(wx.EVT_BUTTON, self.OnCall)
+        self.file_btn.Bind(wx.EVT_BUTTON, self.OnSendFile)
+        self.status_btn.Bind(wx.EVT_BUTTON, self.OnStatusMenu)
+        self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.OnSearch)
+        self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self.OnSearch)
         self.search_ctrl.Bind(wx.EVT_TEXT, self.OnSearchText)
-        
-        self.message_input.Bind(wx.EVT_TEXT_ENTER, lambda e: asyncio.create_task(self.OnSend(e)))
+        self.message_input.Bind(wx.EVT_TEXT_ENTER, self.OnSend)
         self.message_input.Bind(wx.EVT_TEXT, self.OnTyping)
         self.contact_list.Bind(wx.EVT_LISTBOX, self.OnContactSelected)
-        
+        self.contact_list.Bind(wx.EVT_LISTBOX_DCLICK, self.OnContactActivated)
         self.recents_btn.Bind(wx.EVT_BUTTON, self.OnRecentsFocus)
         self.contacts_btn.Bind(wx.EVT_BUTTON, self.OnContactsFocus)
-        self.status_btn.Bind(wx.EVT_BUTTON, self.OnStatusMenu)
-        AsyncBind(wx.EVT_BUTTON, self.OnSendFile, self.file_btn)
+        self.Bind(wx.EVT_CLOSE, self.OnClose)
 
-    async def OnSendFile(self, event):
-        if not self.current_conversation_id: return
-        with wx.FileDialog(self, "Select file to send", wildcard="All files (*.*)|*.*",
-                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as fileDialog:
-            if fileDialog.ShowModal() == wx.ID_CANCEL:
-                return
-            path = fileDialog.GetPath()
-            filename = os.path.basename(path)
-            
-            self.append_message("System", f"Sending {filename}...")
-            with open(path, "rb") as f:
-                content = f.read()
-                success, res = await self.api_client.upload_file(self.current_conversation_id, filename, content)
-                if success:
-                    self.append_message("Me", f"Sent a file: {filename}")
-                else:
-                    self.append_message("System", f"Failed to send file: {res}")
+    # ── App close ────────────────────────────────────────────────────
+
+    def OnClose(self, event):
+        self._alive = False
+        self._call_timer.Stop()
+        self._presence_timer.Stop()
+        if self._typing_timer:
+            self._typing_timer.Stop()
+        self._pool.shutdown(wait=False)
+        self.audio_engine.stop()
+        self.udp_client.stop()
+        self.ws_client.close()
+        self.api_client.close()
+        self.Destroy()
+
+    # ── Helpers ──────────────────────────────────────────────────────
+
+    def _guard(self, fn):
+        """Return a wx.CallAfter-safe wrapper that no-ops if the window is gone."""
+        def wrapper(*args, **kwargs):
+            if self._alive:
+                fn(*args, **kwargs)
+        return wrapper
+
+    # ── Status ───────────────────────────────────────────────────────
 
     def OnStatusMenu(self, event):
         menu = wx.Menu()
-        statuses = ["ONLINE", "AWAY", "BUSY", "INVISIBLE"]
-        for s in statuses:
+        for s in ("ONLINE", "AWAY", "BUSY", "INVISIBLE"):
             item = menu.Append(wx.ID_ANY, s)
-            self.Bind(wx.EVT_MENU, lambda e, status=s: asyncio.create_task(self.ChangeStatus(status)), item)
+            self.Bind(wx.EVT_MENU, lambda e, st=s: self._send_presence(st), item)
         self.PopupMenu(menu)
 
-    async def ChangeStatus(self, status_str):
-        from shared.models import UserStatus, PresenceUpdatePayload
-        status_enum = UserStatus[status_str]
-        payload = PresenceUpdatePayload(user_id=self.user_data["user_id"], status=status_enum)
-        await self.ws_client.send_envelope(Envelope(type=MessageType.PRESENCE_UPDATE, payload=payload.model_dump()))
-        logger.info(f"Status changed to {status_str}")
+    def _send_presence(self, status_str: str):
+        from shared.models import UserStatus
+        payload = PresenceUpdatePayload(
+            user_id=self.user_data["user_id"],
+            status=UserStatus[status_str],
+        )
+        self.ws_client.send_envelope(
+            Envelope(type=MessageType.PRESENCE_UPDATE, payload=payload.model_dump())
+        )
+
+    # ── Tab focus ────────────────────────────────────────────────────
 
     def OnRecentsFocus(self, event):
         self.is_searching = False
         self.list_label.SetLabel("RECENT CONVERSATIONS")
-        self.UpdateContactList() # For now we only have contacts
+        self.UpdateContactList()
         self.contact_list.SetFocus()
 
     def OnContactsFocus(self, event):
@@ -307,63 +383,88 @@ class MainWindow(wx.Frame):
         self.UpdateContactList()
         self.contact_list.SetFocus()
 
-    def play_sound(self, filename, loop=False):
-        sound_path = os.path.join("assets", "sounds", filename)
-        if os.path.exists(sound_path):
-            sound = wx.adv.Sound(sound_path)
-            if sound.IsOk():
-                flags = wx.adv.SOUND_ASYNC
-                if loop: flags |= wx.adv.SOUND_LOOP
-                sound.Play(flags)
-                if loop: self.looping_sound = sound
-                return sound
-        return None
+    # ── Sounds ───────────────────────────────────────────────────────
+
+    def play_sound(self, filename: str, loop: bool = False):
+        path = os.path.join("assets", "sounds", filename)
+        if not os.path.exists(path):
+            return None
+        sound = wx.adv.Sound(path)
+        if not sound.IsOk():
+            return None
+        flags = wx.adv.SOUND_ASYNC | (wx.adv.SOUND_LOOP if loop else 0)
+        sound.Play(flags)
+        if loop:
+            self.looping_sound = sound
+        return sound
 
     def stop_looping_sound(self):
         wx.adv.Sound.Stop()
         self.looping_sound = None
 
-    async def LoadContacts(self):
-        self.contacts = await self.api_client.get_contacts()
+    # ── Contacts ─────────────────────────────────────────────────────
+
+    def _bg_load_contacts(self):
+        contacts = self.api_client.get_contacts()
+        wx.CallAfter(self._on_contacts_loaded, contacts)
+
+    def _on_contacts_loaded(self, contacts):
+        if not self._alive:
+            return
+        self.contacts = contacts
         if not self.is_searching:
             self.UpdateContactList()
 
-    def UpdateContactList(self):
-        # Only Clear if absolutely necessary or if list length changed significantly
-        # For small lists, simple updates are faster and better for screen readers
-        
-        current_selection = self.contact_list.GetSelection()
-        current_items = self.contact_list.GetStrings()
-        new_items = []
+    def TriggerUpdate(self):
+        """Debounce presence redraws — restart 500 ms timer on each call."""
+        self._presence_timer.StartOnce(500)
 
+    def UpdateContactList(self):
         if self.is_searching:
             self.list_label.SetLabel("SEARCH RESULTS")
-            for u in self.search_results:
-                new_items.append(u['display_name'])
+            new_items = [u["display_name"] for u in self.search_results]
         else:
-            # Sort contacts: Online first, then offline
-            sorted_contacts = sorted(self.contacts, key=lambda x: (x['status'] != 'ONLINE', x['display_name']))
-            self.contacts = sorted_contacts
-            for c in self.contacts:
-                status_char = "●" if c['status'] == 'ONLINE' else "○"
-                new_items.append(f"{status_char} {c['display_name']}")
+            self.contacts.sort(key=lambda c: (c["status"] != "ONLINE", c["display_name"]))
+            new_items = [
+                f"{'●' if c['status'] == 'ONLINE' else '○'} {c['display_name']}"
+                for c in self.contacts
+            ]
 
-        if current_items != new_items:
-            self.contact_list.Freeze()
-            self.contact_list.Set(new_items) # Set is more efficient than Clear + multiple Appends
-            if current_selection != wx.NOT_FOUND and current_selection < len(new_items):
-                self.contact_list.SetSelection(current_selection)
-            self.contact_list.Thaw()
+        if list(self.contact_list.GetStrings()) == new_items:
+            return  # Nothing changed — skip the redraw
 
-    async def OnSearch(self, event):
+        selected_id = self.selected_contact["id"] if self.selected_contact else None
+
+        self.contact_list.Freeze()
+        self.contact_list.Set(new_items)
+        if selected_id and not self.is_searching:
+            for i, c in enumerate(self.contacts):
+                if c["id"] == selected_id:
+                    self.contact_list.SetSelection(i)
+                    break
+        self.contact_list.Thaw()
+
+    # ── Search ───────────────────────────────────────────────────────
+
+    def OnSearch(self, event):
         query = self.search_ctrl.GetValue().strip()
         if not query:
             self.is_searching = False
             self.UpdateContactList()
             return
-        
         self.is_searching = True
-        self.search_results = await self.api_client.search_users(query)
+        self._search_seq += 1
+        seq = self._search_seq
+        self._pool.submit(self._bg_search, query, seq)
+
+    def _bg_search(self, query: str, seq: int):
+        results = self.api_client.search_users(query)
+        wx.CallAfter(self._on_search_done, query, seq, results)
+
+    def _on_search_done(self, query: str, seq: int, results):
+        if not self._alive or seq != self._search_seq:
+            return
+        self.search_results = results
         self.UpdateContactList()
         self.contact_list.SetFocus()
 
@@ -372,117 +473,229 @@ class MainWindow(wx.Frame):
             self.is_searching = False
             self.UpdateContactList()
 
-    async def OnContactSelected(self, event):
-        if self._selection_task:
-            self._selection_task.cancel()
-        
-        async def delayed_select():
-            await asyncio.sleep(0.25) # 250ms debounce
-            await self.DoSelectContact()
-            
-        self._selection_task = asyncio.create_task(delayed_select())
+    # ── Contact selection — INSTANT ───────────────────────────────────
 
-    async def DoSelectContact(self):
+    def OnContactSelected(self, event):
+        """Single-click / arrow-key navigation.  Instant UI update, async message load."""
         idx = self.contact_list.GetSelection()
-        if idx == wx.NOT_FOUND: return
-        
-        if self.is_searching:
-            if idx >= len(self.search_results): return
-            user = self.search_results[idx]
-            res = wx.MessageBox(f"Add {user['display_name']} to your contacts?", "Skype™ Reborn", wx.YES_NO)
-            if res == wx.YES:
-                success, msg = await self.api_client.add_contact(user['username'])
-                if success:
-                    await self.LoadContacts()
-                    self.is_searching = False
-                    self.search_ctrl.Clear()
-                    self.UpdateContactList()
+        if idx == wx.NOT_FOUND:
             return
 
-        if idx >= len(self.contacts): return
-        self.selected_contact = self.contacts[idx]
-        self.current_conversation_id = self.selected_contact["id"]
-        self.chat_header.SetLabel(f"{self.selected_contact['display_name']}")
-        
-        # Performance: Clear history first to avoid laggy appends
-        self.message_history.Clear()
-        
+        if self.is_searching:
+            # Just preview the name in the header; activation happens on double-click
+            if idx < len(self.search_results):
+                self.chat_header.SetLabel(self.search_results[idx]["display_name"])
+            return
+
+        if idx >= len(self.contacts):
+            return
+
+        contact = self.contacts[idx]
+
+        # ── Everything below is synchronous — zero delay ──────────────
+        self.selected_contact = contact
+        self.current_conversation_id = contact["id"]
+        self.chat_header.SetLabel(contact["display_name"])
+        self.message_history.SetValue("Loading…")
+
         if not self.chat_area.IsShown():
             self.chat_area.Show()
             self.panel.Layout()
-            
-        await self.LoadMessages()
-        # Removed message_input.SetFocus() to prevent stealing focus during navigation
 
-    async def LoadMessages(self):
-        messages = await self.api_client.get_messages(self.current_conversation_id)
-        # Process messages in one go
-        buffer = ""
-        for m in messages:
-            sender = "Me" if m["sender_id"] == self.user_data["user_id"] else self.selected_contact['display_name']
-            buffer += f"{sender}: {m['content']}\n"
-        self.message_history.SetValue(buffer)
+        # Increment seq so any in-flight load for the previous contact is discarded
+        self._load_seq += 1
+        self._pool.submit(self._bg_load_messages, contact["id"], self._load_seq)
+
+    def OnContactActivated(self, event):
+        """Double-click on a search result → prompt to add contact."""
+        if not self.is_searching:
+            return
+        idx = self.contact_list.GetSelection()
+        if idx == wx.NOT_FOUND or idx >= len(self.search_results):
+            return
+        user = self.search_results[idx]
+        res = wx.MessageBox(
+            f"Add {user['display_name']} to your contacts?", "Skype™ Reborn", wx.YES_NO
+        )
+        if res == wx.YES:
+            self._pool.submit(self._bg_add_contact, user["username"])
+
+    def _bg_add_contact(self, username: str):
+        self.api_client.add_contact(username)
+        contacts = self.api_client.get_contacts()
+        wx.CallAfter(self._on_add_contact_done, contacts)
+
+    def _on_add_contact_done(self, contacts):
+        if not self._alive:
+            return
+        self.contacts = contacts
+        self.is_searching = False
+        self.search_ctrl.Clear()
+        self.UpdateContactList()
+
+    # ── Messages ─────────────────────────────────────────────────────
+
+    def _bg_load_messages(self, conv_id: str, seq: int):
+        messages = self.api_client.get_messages(conv_id)
+        wx.CallAfter(self._on_messages_loaded, seq, messages)
+
+    def _on_messages_loaded(self, seq: int, messages):
+        if not self._alive or seq != self._load_seq:
+            return  # Stale — user already moved to another contact
+        if not messages:
+            self.message_history.SetValue("")
+            return
+        my_id = self.user_data["user_id"]
+        name = self.selected_contact["display_name"]
+        text = "\n".join(
+            f"{'Me' if m['sender_id'] == my_id else name}: {m['content']}"
+            for m in messages
+        )
+        self.message_history.SetValue(text)
         self.message_history.SetInsertionPointEnd()
 
-    def append_message(self, sender, content):
-        self.message_history.AppendText(f"{sender}: {content}\n")
+    def append_message(self, sender: str, content: str):
+        if self.message_history.GetValue() == "Loading…":
+            self.message_history.SetValue(f"{sender}: {content}\n")
+        else:
+            self.message_history.AppendText(f"{sender}: {content}\n")
         self.message_history.SetInsertionPointEnd()
+
+    # ── Typing indicator ─────────────────────────────────────────────
 
     def OnTyping(self, event):
-        if not self.current_conversation_id: return
-        async def debounce_typing():
-            if not self._is_currently_typing:
-                self._is_currently_typing = True
-                payload = ChatTypingPayload(conversation_id=self.current_conversation_id, user_id=self.user_data["user_id"], is_typing=True)
-                await self.ws_client.send_envelope(Envelope(type=MessageType.CHAT_TYPING, payload=payload.model_dump()))
-            await asyncio.sleep(3)
-            self._is_currently_typing = False
-            payload = ChatTypingPayload(conversation_id=self.current_conversation_id, user_id=self.user_data["user_id"], is_typing=False)
-            await self.ws_client.send_envelope(Envelope(type=MessageType.CHAT_TYPING, payload=payload.model_dump()))
-        if self.typing_task: self.typing_task.cancel()
-        self.typing_task = asyncio.create_task(debounce_typing())
+        if not self.current_conversation_id:
+            return
+        if not self._is_typing:
+            self._is_typing = True
+            self._send_typing(True)
+        # Restart the idle countdown every keystroke
+        if self._typing_timer and self._typing_timer.IsRunning():
+            self._typing_timer.Restart(3000)
+        else:
+            self._typing_timer = wx.CallLater(3000, self._on_typing_idle)
 
-    async def OnGlobalAnswer(self, event):
-        if hasattr(self, 'incoming_call_payload'): await self.AnswerCall(self.incoming_call_payload)
+    def _on_typing_idle(self):
+        self._is_typing = False
+        self._typing_timer = None
+        self._send_typing(False)
 
-    async def OnGlobalHangUp(self, event):
-        if self.is_calling: await self.HangUp()
+    def _send_typing(self, is_typing: bool):
+        if not self.current_conversation_id:
+            return
+        payload = ChatTypingPayload(
+            conversation_id=self.current_conversation_id,
+            user_id=self.user_data["user_id"],
+            is_typing=is_typing,
+        )
+        self.ws_client.send_envelope(
+            Envelope(type=MessageType.CHAT_TYPING, payload=payload.model_dump())
+        )
 
-    async def OnSend(self, event):
+    # ── Send message ─────────────────────────────────────────────────
+
+    def OnSend(self, event):
         content = self.message_input.GetValue().strip()
-        if not content or not self.current_conversation_id: return
-        payload = ChatMessagePayload(conversation_id=self.current_conversation_id, sender_id=self.user_data["user_id"], content=content)
-        envelope = Envelope(type=MessageType.CHAT_SEND, payload=payload.model_dump())
-        await self.ws_client.send_envelope(envelope)
+        if not content or not self.current_conversation_id:
+            return
+        payload = ChatMessagePayload(
+            conversation_id=self.current_conversation_id,
+            sender_id=self.user_data["user_id"],
+            content=content,
+        )
+        self.ws_client.send_envelope(
+            Envelope(type=MessageType.CHAT_SEND, payload=payload.model_dump())
+        )
         self.append_message("Me", content)
         self.message_input.Clear()
         self.play_sound("im_sendmessage.wav")
 
-    async def OnCall(self, event):
-        if self.is_calling:
-            await self.HangUp()
+    # ── File transfer ────────────────────────────────────────────────
+
+    def OnSendFile(self, event):
+        if not self.current_conversation_id:
             return
-        if not self.selected_contact: return
+        with wx.FileDialog(self, "Select file to send",
+                           wildcard="All files (*.*)|*.*",
+                           style=wx.FD_OPEN | wx.FD_FILE_MUST_EXIST) as dlg:
+            if dlg.ShowModal() == wx.ID_CANCEL:
+                return
+            path = dlg.GetPath()
+
+        filename = os.path.basename(path)
+        conv_id = self.current_conversation_id
+        self.append_message("System", f"Sending {filename}…")
+        self._pool.submit(self._bg_upload, path, filename, conv_id)
+
+    def _bg_upload(self, path: str, filename: str, conv_id: str):
+        try:
+            with open(path, "rb") as f:
+                content = f.read()
+            success, res = self.api_client.upload_file(conv_id, filename, content)
+        except Exception as e:
+            success, res = False, str(e)
+        wx.CallAfter(self._on_upload_done, success, filename, res)
+
+    def _on_upload_done(self, success: bool, filename: str, res):
+        if not self._alive:
+            return
+        if success:
+            self.append_message("Me", f"Sent file: {filename}")
+        else:
+            self.append_message("System", f"Failed to send {filename}: {res}")
+
+    # ── Calls ────────────────────────────────────────────────────────
+
+    def OnCall(self, event):
+        if self.is_calling:
+            self.HangUp()
+            return
+        if not self.selected_contact:
+            return
+
         self.play_sound("call_request_sent.wav")
         self.is_calling = True
         self.call_btn.SetLabel("Hang Up")
-        self.call_status_text.SetLabel(f"Calling {self.selected_contact['display_name']}...")
+        self.call_status_text.SetLabel(f"Calling {self.selected_contact['display_name']}…")
         self.call_panel.Show()
         self.chat_area.Layout()
-        
-        self.active_session_id = uuid4()
-        payload = CallSignalPayload(session_id=str(self.active_session_id), target_id=self.selected_contact["id"], sender_id=self.user_data["user_id"])
-        await self.ws_client.send_envelope(Envelope(type=MessageType.CALL_INITIATE, payload=payload.model_dump()))
-        self.message_history.AppendText(f"Calling {self.selected_contact['display_name']}...\n")
-        await self.udp_client.start(self.active_session_id, self.audio_engine.receive_audio, user_id=self.user_data["user_id"])
 
-    async def HangUp(self):
+        self.active_session_id = uuid4()
+        payload = CallSignalPayload(
+            session_id=str(self.active_session_id),
+            target_id=self.selected_contact["id"],
+            sender_id=self.user_data["user_id"],
+        )
+        self.ws_client.send_envelope(
+            Envelope(type=MessageType.CALL_INITIATE, payload=payload.model_dump())
+        )
+        self.message_history.AppendText(f"Calling {self.selected_contact['display_name']}…\n")
+        self.udp_client.start(
+            self.active_session_id, self.audio_engine.receive_audio,
+            user_id=self.user_data["user_id"],
+        )
+        self._call_timer.StartOnce(30_000)  # 30-second no-answer timeout
+
+    def _on_call_timeout(self, event):
+        if self.is_calling:
+            self.message_history.AppendText("Call timed out — no answer.\n")
+            self.HangUp()
+
+    def HangUp(self):
+        self._call_timer.Stop()
         if self.active_session_id and self.selected_contact:
-            payload = CallSignalPayload(session_id=str(self.active_session_id), target_id=self.selected_contact["id"], sender_id=self.user_data["user_id"])
-            await self.ws_client.send_envelope(Envelope(type=MessageType.CALL_HANGUP, payload=payload.model_dump()))
+            payload = CallSignalPayload(
+                session_id=str(self.active_session_id),
+                target_id=self.selected_contact["id"],
+                sender_id=self.user_data["user_id"],
+            )
+            self.ws_client.send_envelope(
+                Envelope(type=MessageType.CALL_HANGUP, payload=payload.model_dump())
+            )
         self.stop_call()
 
     def stop_call(self):
+        self._call_timer.Stop()
         self.stop_looping_sound()
         self.audio_engine.stop()
         self.udp_client.stop()
@@ -492,78 +705,112 @@ class MainWindow(wx.Frame):
         self.chat_area.Layout()
         self.message_history.AppendText("Call ended.\n")
         self.play_sound("call_end.wav")
-        if hasattr(self, 'incoming_call_payload'): del self.incoming_call_payload
+        if hasattr(self, "_incoming_call"):
+            del self._incoming_call
 
-    async def AnswerCall(self, payload):
+    def AnswerCall(self, payload):
+        self._call_timer.Stop()
         self.stop_looping_sound()
         self.play_sound("Call_Answer.wav")
         self.active_session_id = UUID(payload.session_id)
-        accept_payload = CallSignalPayload(session_id=payload.session_id, target_id=payload.sender_id, sender_id=self.user_data["user_id"])
-        await self.ws_client.send_envelope(Envelope(type=MessageType.CALL_ACCEPT, payload=accept_payload.model_dump()))
-        await self.udp_client.start(self.active_session_id, self.audio_engine.receive_audio, user_id=self.user_data["user_id"])
+
+        accept = CallSignalPayload(
+            session_id=payload.session_id,
+            target_id=payload.sender_id,
+            sender_id=self.user_data["user_id"],
+        )
+        self.ws_client.send_envelope(
+            Envelope(type=MessageType.CALL_ACCEPT, payload=accept.model_dump())
+        )
+        self.udp_client.start(
+            self.active_session_id, self.audio_engine.receive_audio,
+            user_id=self.user_data["user_id"],
+        )
         self.audio_engine.start(self.udp_client.send_audio)
         self.is_calling = True
+
         if not self.chat_area.IsShown():
             self.chat_area.Show()
-        
-        self.call_status_text.SetLabel(f"In call with contact")
+        self.call_status_text.SetLabel("In call")
         self.call_panel.Show()
         self.panel.Layout()
-        
         self.call_btn.SetLabel("Hang Up")
-        self.message_history.AppendText(f"Call with contact started.\n")
+        self.message_history.AppendText("Call started.\n")
 
-    async def on_ws_message(self, envelope: Envelope):
-        if envelope.type == MessageType.CHAT_RECEIVE:
+    # ── WebSocket handler (always on main thread via wx.CallAfter) ────
+
+    def on_ws_message(self, envelope: Envelope):
+        if not self._alive:
+            return
+        t = envelope.type
+
+        if t == MessageType.CHAT_RECEIVE:
             payload = ChatMessagePayload(**envelope.payload)
-            sender_name = self.selected_contact['display_name'] if self.selected_contact else "Friend"
-            self.append_message(sender_name, payload.content)
+            sender = self.selected_contact["display_name"] if self.selected_contact else "Friend"
+            self.append_message(sender, payload.content)
             self.play_sound("im_sendmessage.wav")
             self.RequestUserAttention(wx.USER_ATTENTION_INFO)
-        elif envelope.type == MessageType.CHAT_TYPING:
+
+        elif t == MessageType.CHAT_TYPING:
             payload = ChatTypingPayload(**envelope.payload)
-            if payload.is_typing: self.typing_status.SetLabel("Typing...")
-            else: self.typing_status.SetLabel("")
-        elif envelope.type == MessageType.CONTACT_REQUEST:
+            self.typing_status.SetLabel("Typing…" if payload.is_typing else "")
+
+        elif t == MessageType.CONTACT_REQUEST:
             self.play_sound("misk_chatrequest.wav")
-            await self.LoadContacts()
-        elif envelope.type == MessageType.PRESENCE_BROADCAST:
+            self._pool.submit(self._bg_load_contacts)
+
+        elif t == MessageType.PRESENCE_BROADCAST:
             payload = PresenceUpdatePayload(**envelope.payload)
-            # Update local contacts list instead of re-fetching everything
-            updated = False
             for c in self.contacts:
                 if c["id"] == payload.user_id:
                     c["status"] = payload.status.value
-                    updated = True
-                    break
-            if updated:
-                self.TriggerUpdate()
-            else:
-                # If it's a new contact we don't know about, maybe re-fetch
-                await self.LoadContacts()
-        elif envelope.type == MessageType.CALL_INITIATE:
+                    self.TriggerUpdate()
+                    return
+            # Unknown contact — full refresh
+            self._pool.submit(self._bg_load_contacts)
+
+        elif t == MessageType.CALL_INITIATE:
             payload = CallSignalPayload(**envelope.payload)
-            self.incoming_call_payload = payload
-            if self.is_calling: self.play_sound("call_ring_active.wav", loop=True)
-            else: self.play_sound("call_ring1.wav", loop=True)
-            sender_name = "Someone"
-            for c in self.contacts:
-                if c["id"] == payload.sender_id: sender_name = c["display_name"]
+            self._incoming_call = payload
+            self.play_sound("call_ring_active.wav" if self.is_calling else "call_ring1.wav",
+                            loop=True)
+            sender_name = next(
+                (c["display_name"] for c in self.contacts if c["id"] == payload.sender_id),
+                "Someone",
+            )
             self.RequestUserAttention(wx.USER_ATTENTION_ERROR)
-            res = wx.MessageBox(f"Skype: {sender_name} is calling. Answer?", "Incoming Call", wx.YES_NO)
-            if res == wx.YES: await self.AnswerCall(payload)
+            res = wx.MessageBox(
+                f"Skype: {sender_name} is calling. Answer?", "Incoming Call", wx.YES_NO
+            )
+            if res == wx.YES:
+                self.AnswerCall(payload)
             else:
-                await self.ws_client.send_envelope(Envelope(type=MessageType.CALL_REJECT, payload=payload.model_dump()))
+                self.ws_client.send_envelope(
+                    Envelope(type=MessageType.CALL_REJECT, payload=payload.model_dump())
+                )
                 self.stop_looping_sound()
-        elif envelope.type == MessageType.CALL_CONNECTING: self.play_sound("call_connecting.wav", loop=True)
-        elif envelope.type == MessageType.CALL_ACCEPT:
+
+        elif t == MessageType.CALL_CONNECTING:
+            self.play_sound("call_connecting.wav", loop=True)
+
+        elif t == MessageType.CALL_ACCEPT:
+            self._call_timer.Stop()
             self.stop_looping_sound()
             self.message_history.AppendText("Call accepted.\n")
             self.call_btn.SetLabel("Hang Up")
             self.audio_engine.start(self.udp_client.send_audio)
-        elif envelope.type == MessageType.CALL_REJECT:
+
+        elif t == MessageType.CALL_REJECT:
+            self._call_timer.Stop()
             self.message_history.AppendText("Call rejected.\n")
             self.stop_call()
-        elif envelope.type == MessageType.CALL_HANGUP:
+
+        elif t == MessageType.CALL_HANGUP:
             self.message_history.AppendText("Peer hung up.\n")
             self.stop_call()
+
+    def on_ws_disconnect(self):
+        if not self._alive:
+            return
+        logger.warning("WebSocket disconnected")
+        self.message_history.AppendText("\n[Disconnected from server]\n")

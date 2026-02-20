@@ -7,7 +7,6 @@ structlog
 aiofiles
 sqlalchemy
 aiosqlite
-wxasync
 wxPython
 sounddevice
 numpy

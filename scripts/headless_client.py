@@ -1,12 +1,12 @@
 import asyncio
+import os
 import httpx
 import websockets
-import json
 from shared.models import Envelope, MessageType, ChatMessagePayload
 
 async def run_headless(username, password):
-    base_url = "http://127.0.0.1:8000"
-    ws_url = "ws://127.0.0.1:8000"
+    base_url = os.environ.get("SKYPE_SERVER_URL", "http://127.0.0.1:8000")
+    ws_url = base_url.replace("http://", "ws://").replace("https://", "wss://")
     
     async with httpx.AsyncClient() as client:
         # Login

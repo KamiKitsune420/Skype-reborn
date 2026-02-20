@@ -1,4 +1,5 @@
 from typing import Dict, List
+from uuid import uuid4
 from fastapi import WebSocket
 import structlog
 from shared.models import Envelope, MessageType, UserStatus, PresenceUpdatePayload

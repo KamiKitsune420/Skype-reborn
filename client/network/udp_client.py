@@ -1,58 +1,101 @@
-import asyncio
 import socket
 import struct
+import threading
+import structlog
 from uuid import UUID
 
+logger = structlog.get_logger()
+
+# All-zero UUID signals a HELLO registration packet (not audio)
+_ZERO_UUID = UUID(int=0)
+
+
 class UDPClient:
-    def __init__(self, host, port):
+    """UDP audio client backed by a plain socket + daemon receiver thread.
+
+    No asyncio required — socket I/O is straightforward enough that a
+    blocking thread is simpler and faster than an event-loop protocol.
+    """
+
+    def __init__(self, host: str, port: int):
         self.host = host
         self.port = port
-        self.transport = None
-        self.session_id = None
+        self._sock: socket.socket | None = None
+        self._recv_thread: threading.Thread | None = None
+        self._running = False
+        self.session_id: UUID | None = None
         self.on_audio_received = None
-        self.seq = 0
+        self._seq = 0
 
-    async def start(self, session_id: UUID, on_audio_received, user_id=None):
+    def start(self, session_id: UUID, on_audio_received, user_id: str = None):
+        """Open socket and start receive thread. Stops any previous session first."""
+        self.stop()
+
         self.session_id = session_id
         self.on_audio_received = on_audio_received
-        
-        loop = asyncio.get_running_loop()
-        self.transport, _ = await loop.create_datagram_endpoint(
-            lambda: self,
-            remote_addr=(self.host, self.port)
-        )
-        
+        self._seq = 0
+
+        self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._sock.connect((self.host, self.port))  # Sets default dest; not a TCP handshake
+        self._sock.settimeout(1.0)
+
         if user_id:
-            # Send a small packet to register this address with the user_id on the relay
-            self.send_audio(f"HELLO:{user_id}".encode()) 
+            # Register our address with the relay using the all-zero session_id
+            self._send_raw(_ZERO_UUID, f"HELLO:{user_id}".encode())
 
-    def connection_made(self, transport):
-        self.transport = transport
+        self._running = True
+        self._recv_thread = threading.Thread(
+            target=self._recv_loop, daemon=True, name="UDPRecv"
+        )
+        self._recv_thread.start()
 
-    def datagram_received(self, data, addr):
-        # Header: session_id (16), seq (2), ts (4), codec (1), len (2)
-        if len(data) < 25:
+    # ── Receive loop ─────────────────────────────────────────────────
+
+    def _recv_loop(self):
+        while self._running:
+            try:
+                data = self._sock.recv(4096)
+            except socket.timeout:
+                continue
+            except OSError:
+                break  # Socket closed — exit cleanly
+
+            # Packet layout: session_id(16) seq(2) ts(4) codec(1) len(2) = 25 bytes header
+            if len(data) < 25:
+                continue
+            payload = data[25:]
+            if payload and self.on_audio_received:
+                self.on_audio_received(payload)
+
+    # ── Send ─────────────────────────────────────────────────────────
+
+    def send_audio(self, payload: bytes):
+        if self._sock and self.session_id:
+            self._send_raw(self.session_id, payload)
+
+    def _send_raw(self, session_id: UUID, payload: bytes):
+        if not self._sock:
             return
-        
-        # In a real app we'd verify session_id
-        payload = data[25:]
-        if self.on_audio_received:
-            self.on_audio_received(payload)
-
-    def send_audio(self, payload):
-        if not self.transport or not self.session_id:
-            return
-        
-        # Header: session_id (16), seq (2), ts (4), codec (1), len (2)
-        header = self.session_id.bytes
-        header += struct.pack("!H", self.seq)
-        header += struct.pack("!I", 0) # ts placeholder
-        header += struct.pack("!B", 2) # codec PCM
+        header = session_id.bytes
+        header += struct.pack("!H", self._seq)
+        header += struct.pack("!I", 0)       # timestamp placeholder
+        header += struct.pack("!B", 2)       # codec: PCM
         header += struct.pack("!H", len(payload))
-        
-        self.transport.sendto(header + payload)
-        self.seq = (self.seq + 1) % 65536
+        try:
+            self._sock.send(header + payload)
+        except OSError as e:
+            logger.error("UDP send failed", error=str(e))
+        self._seq = (self._seq + 1) % 65536
+
+    # ── Lifecycle ────────────────────────────────────────────────────
 
     def stop(self):
-        if self.transport:
-            self.transport.close()
+        self._running = False
+        if self._sock:
+            try:
+                self._sock.close()
+            except OSError:
+                pass
+            self._sock = None
+        self.session_id = None
+        self._seq = 0

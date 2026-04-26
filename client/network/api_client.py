@@ -77,11 +77,17 @@ class APIClient:
             logger.error("Failed to search users", error=str(e))
             return []
 
-    def update_profile(self, display_name: Optional[str] = None):
+    def get_profile(self) -> Dict[str, Any]:
         try:
-            payload: Dict[str, Any] = {"user_id": self.user_id}
-            if display_name:
-                payload["display_name"] = display_name
+            resp = self.client.get("/profile/me")
+            return resp.json() if resp.status_code == 200 else {}
+        except Exception as e:
+            logger.error("Failed to get profile", error=str(e))
+            return {}
+
+    def update_profile(self, **fields) -> bool:
+        try:
+            payload: Dict[str, Any] = {"user_id": self.user_id, **fields}
             resp = self.client.post("/profile/update", json=payload)
             return resp.status_code == 200
         except Exception as e:

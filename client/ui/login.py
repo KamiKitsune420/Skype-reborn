@@ -1,134 +1,203 @@
-import wx
-import wx.adv
 import os
 import threading
+import wx
+import wx.adv
 import structlog
 from ..network.api_client import APIClient
 
 logger = structlog.get_logger()
+
+# Skype 7-inspired palette
+_BLUE     = wx.Colour(0, 120, 212)
+_BG       = wx.Colour(255, 255, 255)
+_TEXT     = wx.Colour(32, 31, 30)
+_GRAY     = wx.Colour(96, 94, 92)
+_BORDER   = wx.Colour(200, 198, 196)
+_ERROR    = wx.Colour(168, 0, 0)
+_SUCCESS  = wx.Colour(16, 124, 16)
+
+
+def _bold(ctrl):
+    f = ctrl.GetFont()
+    f.SetWeight(wx.FONTWEIGHT_BOLD)
+    ctrl.SetFont(f)
 
 
 class LoginFrame(wx.Frame):
     def __init__(self, api_client: APIClient, on_login_success):
         super().__init__(
             None,
-            title="Skype™ Reborn — Login",
-            size=(400, 650),
+            title="Skype™ Reborn",
+            size=(420, 580),
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
-            name="Skype Login Window",
+            name="Login Window",
         )
         self.api_client = api_client
         self._on_login_success = on_login_success
+        self.SetBackgroundColour(_BG)
         self._build_ui()
         self.Centre()
 
+    # ── Layout ───────────────────────────────────────────────────────
+
     def _build_ui(self):
-        self.panel = wx.Panel(self, name="Login Panel")
+        panel = wx.Panel(self, name="Login Panel")
+        panel.SetBackgroundColour(_BG)
         root = wx.BoxSizer(wx.VERTICAL)
 
         # Logo
-        header_path = os.path.join("assets", "images", "skype_header.png")
-        if os.path.exists(header_path):
-            img = wx.Image(header_path, wx.BITMAP_TYPE_ANY)
+        logo_path = os.path.join("assets", "images", "skype_header.png")
+        if os.path.exists(logo_path):
+            img = wx.Image(logo_path, wx.BITMAP_TYPE_ANY)
             w, h = img.GetSize()
-            new_h = int(h * (400 / w))
-            img = img.Scale(400, new_h, wx.IMAGE_QUALITY_HIGH)
-            root.Add(wx.StaticBitmap(self.panel, -1, wx.Bitmap(img), name="Skype Logo"),
-                     0, wx.EXPAND | wx.BOTTOM, 20)
+            new_h = int(h * (340 / w))
+            img = img.Scale(340, new_h, wx.IMAGE_QUALITY_HIGH)
+            root.Add(
+                wx.StaticBitmap(panel, bitmap=wx.Bitmap(img), name="Logo"),
+                0, wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, 16,
+            )
+        else:
+            title = wx.StaticText(panel, label="Skype™ Reborn", style=wx.ALIGN_CENTER)
+            f = title.GetFont()
+            f.SetPointSize(20)
+            f.SetWeight(wx.FONTWEIGHT_BOLD)
+            title.SetFont(f)
+            title.SetForegroundColour(_BLUE)
+            root.Add(title, 0, wx.ALIGN_CENTER | wx.TOP | wx.BOTTOM, 24)
 
-        # ── Login view ───────────────────────────────────────────────
-        self.login_view = wx.Panel(self.panel)
-        lv = wx.BoxSizer(wx.VERTICAL)
+        # Page switcher
+        self._book = wx.Simplebook(panel)
+        self._book.SetBackgroundColour(_BG)
+        self._build_login_page()
+        self._build_register_page()
+        root.Add(self._book, 1, wx.EXPAND | wx.LEFT | wx.RIGHT, 36)
 
-        grid = wx.FlexGridSizer(2, 2, 10, 25)
-        grid.AddGrowableCol(1, 1)
+        # Status text
+        self.status_text = wx.StaticText(
+            panel, label="", style=wx.ALIGN_CENTER, name="Status Text"
+        )
+        f2 = self.status_text.GetFont()
+        f2.SetPointSize(9)
+        self.status_text.SetFont(f2)
+        self.status_text.SetForegroundColour(_ERROR)
+        root.Add(self.status_text, 0, wx.ALIGN_CENTER | wx.ALL, 10)
 
-        self.user_label = wx.StaticText(self.login_view, label="&Skype Name", name="Skype Name Label")
-        self.user_ctrl = wx.TextCtrl(self.login_view, name="Skype Name Input")
-        self.pass_label = wx.StaticText(self.login_view, label="&Password", name="Password Label")
-        self.pass_ctrl = wx.TextCtrl(self.login_view, style=wx.TE_PASSWORD, name="Password Input")
+        panel.SetSizer(root)
 
-        for widget in (self.user_label, self.user_ctrl, self.pass_label, self.pass_ctrl):
-            grid.Add(widget, 0 if isinstance(widget, wx.StaticText) else 1,
-                     wx.ALIGN_CENTER_VERTICAL if isinstance(widget, wx.StaticText) else wx.EXPAND)
+    def _field(self, parent, label: str, name: str, password: bool = False):
+        """Returns (label_widget, text_ctrl) stacked vertically — caller adds both."""
+        lbl = wx.StaticText(parent, label=label)
+        lbl.SetForegroundColour(_TEXT)
+        f = lbl.GetFont()
+        f.SetPointSize(9)
+        f.SetWeight(wx.FONTWEIGHT_BOLD)
+        lbl.SetFont(f)
+        style = wx.TE_PROCESS_ENTER | (wx.TE_PASSWORD if password else 0)
+        ctrl = wx.TextCtrl(parent, style=style, name=name)
+        ctrl.SetMinSize((-1, 32))
+        return lbl, ctrl
 
-        lv.Add(grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 30)
+    def _build_login_page(self):
+        page = wx.Panel(self._book, name="Login Page")
+        page.SetBackgroundColour(_BG)
+        sz = wx.BoxSizer(wx.VERTICAL)
 
-        self.remember_cb = wx.CheckBox(self.login_view, label="&Remember me")
-        lv.Add(self.remember_cb, 0, wx.LEFT | wx.BOTTOM, 30)
+        hdr = wx.StaticText(page, label="Sign in to Skype™ Reborn")
+        f = hdr.GetFont()
+        f.SetPointSize(13)
+        f.SetWeight(wx.FONTWEIGHT_BOLD)
+        hdr.SetFont(f)
+        hdr.SetForegroundColour(_TEXT)
+        sz.Add(hdr, 0, wx.BOTTOM, 18)
 
-        btn_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.to_reg_btn = wx.Button(self.login_view, label="Create &account", size=(130, 35))
-        self.login_btn = wx.Button(self.login_view, label="&Sign in", size=(100, 35))
+        user_lbl, self.user_ctrl = self._field(page, "Skype Name", "Username")
+        sz.Add(user_lbl, 0, wx.BOTTOM, 4)
+        sz.Add(self.user_ctrl, 0, wx.EXPAND | wx.BOTTOM, 12)
+
+        pass_lbl, self.pass_ctrl = self._field(page, "Password", "Password", password=True)
+        sz.Add(pass_lbl, 0, wx.BOTTOM, 4)
+        sz.Add(self.pass_ctrl, 0, wx.EXPAND | wx.BOTTOM, 10)
+
+        self.remember_cb = wx.CheckBox(page, label="Remember me")
+        sz.Add(self.remember_cb, 0, wx.BOTTOM, 18)
+
+        # Primary button — Sign In
+        self.login_btn = wx.Button(page, label="Sign In", name="Sign In")
         self.login_btn.SetDefault()
-        btn_row.Add(self.to_reg_btn, 0, wx.RIGHT, 15)
-        btn_row.Add(self.login_btn)
-        lv.Add(btn_row, 0, wx.ALIGN_CENTER | wx.BOTTOM, 25)
+        self.login_btn.SetBackgroundColour(_BLUE)
+        self.login_btn.SetForegroundColour(wx.WHITE)
+        self.login_btn.SetMinSize((-1, 36))
+        sz.Add(self.login_btn, 0, wx.EXPAND | wx.BOTTOM, 12)
 
-        self.login_view.SetSizer(lv)
-        root.Add(self.login_view, 1, wx.EXPAND)
+        # Divider with "or"
+        sep = wx.BoxSizer(wx.HORIZONTAL)
+        sep.Add(wx.StaticLine(page), 1, wx.ALIGN_CENTER_VERTICAL)
+        sep.Add(wx.StaticText(page, label="  or  "), 0, wx.ALIGN_CENTER_VERTICAL)
+        sep.Add(wx.StaticLine(page), 1, wx.ALIGN_CENTER_VERTICAL)
+        sz.Add(sep, 0, wx.EXPAND | wx.BOTTOM, 12)
 
-        # ── Register view ────────────────────────────────────────────
-        self.register_view = wx.Panel(self.panel, name="Registration View")
-        rv = wx.BoxSizer(wx.VERTICAL)
+        # Secondary button — Create Account
+        self.to_reg_btn = wx.Button(page, label="Create Account", name="Create Account")
+        self.to_reg_btn.SetMinSize((-1, 36))
+        sz.Add(self.to_reg_btn, 0, wx.EXPAND)
 
-        reg_grid = wx.FlexGridSizer(5, 2, 10, 25)
-        reg_grid.AddGrowableCol(1, 1)
+        page.SetSizer(sz)
+        self._book.AddPage(page, "Login")
+
+        self.login_btn.Bind(wx.EVT_BUTTON, self.OnLogin)
+        self.pass_ctrl.Bind(wx.EVT_TEXT_ENTER, self.OnLogin)
+        self.user_ctrl.Bind(wx.EVT_TEXT_ENTER, lambda e: self.pass_ctrl.SetFocus())
+        self.to_reg_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_page(1))
+
+    def _build_register_page(self):
+        page = wx.Panel(self._book, name="Register Page")
+        page.SetBackgroundColour(_BG)
+        sz = wx.BoxSizer(wx.VERTICAL)
+
+        hdr = wx.StaticText(page, label="Create your account")
+        f = hdr.GetFont()
+        f.SetPointSize(13)
+        f.SetWeight(wx.FONTWEIGHT_BOLD)
+        hdr.SetFont(f)
+        hdr.SetForegroundColour(_TEXT)
+        sz.Add(hdr, 0, wx.BOTTOM, 16)
 
         fields = [
-            ("&Skype Name",  "Reg Skype Name",   False),
-            ("&Password",    "Reg Password",      True),
-            ("&Email",       "Reg Email",         False),
-            ("&First Name",  "Reg First Name",    False),
-            ("&Last Name",   "Reg Last Name",     False),
+            ("Skype Name",  "Reg Username", False),
+            ("Password",    "Reg Password", True),
+            ("Email",       "Reg Email",    False),
+            ("First Name",  "Reg First",    False),
+            ("Last Name",   "Reg Last",     False),
         ]
         self._reg_ctrls = []
         for label, name, is_pass in fields:
-            lbl = wx.StaticText(self.register_view, label=label)
-            ctrl = wx.TextCtrl(
-                self.register_view,
-                style=wx.TE_PASSWORD if is_pass else 0,
-                name=name,
-            )
+            lbl, ctrl = self._field(page, label, name, is_pass)
+            sz.Add(lbl,  0, wx.BOTTOM, 3)
+            sz.Add(ctrl, 0, wx.EXPAND | wx.BOTTOM, 9)
             self._reg_ctrls.append(ctrl)
-            reg_grid.Add(lbl, 0, wx.ALIGN_CENTER_VERTICAL)
-            reg_grid.Add(ctrl, 1, wx.EXPAND)
 
-        rv.Add(reg_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 30)
+        # Primary button
+        self.do_reg_btn = wx.Button(page, label="Create Account", name="Register")
+        self.do_reg_btn.SetDefault()
+        self.do_reg_btn.SetBackgroundColour(_BLUE)
+        self.do_reg_btn.SetForegroundColour(wx.WHITE)
+        self.do_reg_btn.SetMinSize((-1, 36))
+        sz.Add(self.do_reg_btn, 0, wx.EXPAND | wx.BOTTOM, 12)
 
-        reg_btn_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.do_reg_btn = wx.Button(self.register_view, label="&Register", size=(100, 35),
-                                     name="Register Action Button")
-        reg_btn_row.Add(self.do_reg_btn)
-        rv.Add(reg_btn_row, 0, wx.ALIGN_CENTER | wx.BOTTOM, 25)
+        # Back link
+        back_btn = wx.Button(page, label="Back to Sign In", name="Back to Login")
+        back_btn.SetMinSize((-1, 32))
+        sz.Add(back_btn, 0, wx.ALIGN_CENTER)
 
-        self.register_view.SetSizer(rv)
-        root.Add(self.register_view, 1, wx.EXPAND)
-        self.register_view.Hide()
+        page.SetSizer(sz)
+        self._book.AddPage(page, "Register")
 
-        # Status line
-        self.status_text = wx.StaticText(self.panel, label="", style=wx.ALIGN_CENTER)
-        root.Add(self.status_text, 0, wx.ALIGN_CENTER | wx.ALL, 10)
-
-        self.panel.SetSizer(root)
-
-        # Bindings (all sync — threads handle network work)
-        self.login_btn.Bind(wx.EVT_BUTTON, self.OnLogin)
         self.do_reg_btn.Bind(wx.EVT_BUTTON, self.OnRegister)
-        self.to_reg_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_view("register"))
+        back_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_page(0))
 
-    def _show_view(self, which: str):
-        self.login_view.Show(which == "login")
-        self.register_view.Show(which == "register")
+    def _show_page(self, idx: int):
         self.status_text.SetLabel("")
-        # Use Hide/Show to ensure they are physically removed from layout flow
-        if which == "login":
-            self.register_view.Hide()
-            self.login_view.Show()
-        else:
-            self.login_view.Hide()
-            self.register_view.Show()
-        self.panel.Layout()
+        self._book.SetSelection(idx)
 
     # ── Login ────────────────────────────────────────────────────────
 
@@ -136,9 +205,9 @@ class LoginFrame(wx.Frame):
         username = self.user_ctrl.GetValue().strip()
         password = self.pass_ctrl.GetValue().strip()
         if not username or not password:
-            self.status_text.SetLabel("Enter Skype Name and password.")
+            self._set_status("Please enter your Skype Name and password.", error=True)
             return
-        self.status_text.SetLabel("Signing in…")
+        self._set_status("Signing in…")
         self.login_btn.Disable()
         threading.Thread(
             target=self._do_login, args=(username, password), daemon=True
@@ -150,7 +219,7 @@ class LoginFrame(wx.Frame):
 
     def _on_login_done(self, success: bool, res):
         if success:
-            self.status_text.SetLabel("Success!")
+            self._set_status("Signed in!", error=False)
             sound_path = os.path.join("assets", "sounds", "misk_signin.wav")
             if os.path.exists(sound_path):
                 s = wx.adv.Sound(sound_path)
@@ -158,7 +227,7 @@ class LoginFrame(wx.Frame):
                     s.Play(wx.adv.SOUND_ASYNC)
             self._on_login_success(res)
         else:
-            self.status_text.SetLabel(f"Sign in failed: {res}")
+            self._set_status(f"Sign in failed: {res}", error=True)
             self.login_btn.Enable()
 
     # ── Register ─────────────────────────────────────────────────────
@@ -167,9 +236,9 @@ class LoginFrame(wx.Frame):
         keys = ["username", "password", "email", "first_name", "last_name"]
         data = {k: c.GetValue().strip() for k, c in zip(keys, self._reg_ctrls)}
         if any(not v for v in data.values()):
-            wx.MessageBox("All fields are required.", "Registration", wx.OK | wx.ICON_WARNING)
+            self._set_status("All fields are required.", error=True)
             return
-        self.status_text.SetLabel("Creating account…")
+        self._set_status("Creating account…")
         self.do_reg_btn.Disable()
         threading.Thread(target=self._do_register, args=(data,), daemon=True).start()
 
@@ -179,13 +248,26 @@ class LoginFrame(wx.Frame):
 
     def _on_register_done(self, success: bool, msg: str):
         self.do_reg_btn.Enable()
+        self.status_text.SetLabel("")
         if success:
-            wx.MessageBox("Account created successfully. You can now sign in.", 
-                          "Registration Success", wx.OK | wx.ICON_INFORMATION)
             for c in self._reg_ctrls:
                 c.Clear()
-            self._show_view("login")
+            wx.MessageBox(
+                "Your account has been created successfully!\n\nClick OK to sign in.",
+                "Account Created",
+                wx.OK | wx.ICON_INFORMATION,
+                self,
+            )
+            self._show_page(0)
         else:
-            wx.MessageBox(f"Registration failed: {msg}", 
-                          "Registration Error", wx.OK | wx.ICON_ERROR)
-            self.status_text.SetLabel(f"Failed: {msg}")
+            wx.MessageBox(
+                f"Registration failed:\n\n{msg}",
+                "Could Not Create Account",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
+
+    def _set_status(self, msg: str, error: bool = False):
+        self.status_text.SetLabel(msg)
+        self.status_text.SetForegroundColour(_ERROR if error else _SUCCESS)
+        self.status_text.GetParent().Layout()

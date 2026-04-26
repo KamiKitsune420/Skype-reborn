@@ -75,11 +75,18 @@ class ProfileUpdatePayload(BaseModel):
     display_name: Optional[str] = None
     avatar_url: Optional[str] = None
     mood: Optional[str] = None
+    country: Optional[str] = None
+    hometown: Optional[str] = None
+    birthday: Optional[str] = None
 
 class SettingsPayload(BaseModel):
     push_to_talk: bool = False
     notification_sounds: bool = True
     theme: str = "Classic"
+    input_device: str = "Default"
+    output_device: str = "Default"
+    camera_device: str = "Default"
+    ringtone: str = "call_ring1.wav"
 
 class ChatMessagePayload(BaseModel):
     conversation_id: str

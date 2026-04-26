@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, DateTime, ForeignKey, Text, Integer
+from sqlalchemy import String, DateTime, ForeignKey, Text, Integer, text
+from typing import Optional
 from datetime import datetime
 from uuid import uuid4
 from .config import settings
@@ -13,16 +14,22 @@ class Base(DeclarativeBase):
 
 class User(Base):
     __tablename__ = "users"
-    
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
-    username: Mapped[str] = mapped_column(String, unique=True, index=True)
-    email: Mapped[str] = mapped_column(String, unique=True, index=True)
-    password_hash: Mapped[str] = mapped_column(String)
-    first_name: Mapped[str] = mapped_column(String)
-    last_name: Mapped[str] = mapped_column(String)
-    display_name: Mapped[str] = mapped_column(String)
-    status: Mapped[str] = mapped_column(String, default="OFFLINE")
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    id:            Mapped[str]           = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    username:      Mapped[str]           = mapped_column(String, unique=True, index=True)
+    email:         Mapped[str]           = mapped_column(String, unique=True, index=True)
+    password_hash: Mapped[str]           = mapped_column(String)
+    first_name:    Mapped[str]           = mapped_column(String)
+    last_name:     Mapped[str]           = mapped_column(String)
+    display_name:  Mapped[str]           = mapped_column(String)
+    status:        Mapped[str]           = mapped_column(String, default="OFFLINE")
+    created_at:    Mapped[datetime]      = mapped_column(DateTime, default=datetime.utcnow)
+    # Extended profile fields (added post-launch — migrated via init_db)
+    mood_message:  Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
+    country:       Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
+    hometown:      Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
+    birthday:      Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
+    avatar_path:   Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
 
 class Message(Base):
     __tablename__ = "messages"
@@ -57,6 +64,18 @@ class FileTransfer(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Non-destructive migration: add new columns to existing databases.
+        for col, sql_type in [
+            ("mood_message", "TEXT DEFAULT ''"),
+            ("country",      "TEXT DEFAULT ''"),
+            ("hometown",     "TEXT DEFAULT ''"),
+            ("birthday",     "TEXT DEFAULT ''"),
+            ("avatar_path",  "TEXT DEFAULT ''"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {sql_type}"))
+            except Exception:
+                pass  # column already exists
 
 async def get_db():
     async with SessionLocal() as session:

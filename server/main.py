@@ -1,5 +1,6 @@
 import asyncio
 import os
+import sys
 import aiofiles
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any
@@ -24,21 +25,76 @@ import structlog
 
 logger = structlog.get_logger()
 
+_BOT_ACCOUNTS = [
+    {
+        "username":     "echo_service",
+        "password":     "botpassword",
+        "email":        "echo_service@system.local",
+        "first_name":   "Echo",
+        "last_name":    "Service",
+        "display_name": "Echo / Sound Test",
+    },
+]
+
+async def ensure_bots_registered():
+    """Create bot accounts that don't yet exist and wire them as contacts for all users."""
+    async with SessionLocal() as db:
+        for spec in _BOT_ACCOUNTS:
+            res = await db.execute(select(User).where(User.username == spec["username"]))
+            bot_user = res.scalars().first()
+            if not bot_user:
+                bot_user = User(
+                    username=spec["username"],
+                    email=spec["email"],
+                    password_hash=get_password_hash(spec["password"]),
+                    first_name=spec["first_name"],
+                    last_name=spec["last_name"],
+                    display_name=spec["display_name"],
+                    status="ONLINE",
+                )
+                db.add(bot_user)
+                await db.flush()
+                logger.info("Bot account created", username=spec["username"])
+
+            # Ensure every existing non-bot user has this bot in their contact list
+            all_users = await db.execute(
+                select(User).where(User.id != bot_user.id, ~User.username.like("%_service%"))
+            )
+            for user in all_users.scalars().all():
+                exists = await db.execute(
+                    select(Contact).where(
+                        Contact.user_id == user.id,
+                        Contact.contact_user_id == bot_user.id,
+                    )
+                )
+                if not exists.scalars().first():
+                    db.add(Contact(user_id=user.id, contact_user_id=bot_user.id))
+
+        await db.commit()
+
+
 async def start_bots():
     bot_dir = "server/bots"
     if not os.path.exists(bot_dir):
         return []
-    
+
+    # Bots import from the project root (e.g. `from server.bots.sdk import ...`).
+    # When launched as a script their sys.path[0] is server/bots/, which breaks
+    # those imports.  Pass PYTHONPATH so they can reach the project root.
+    project_root = os.getcwd()
+    env = os.environ.copy()
+    env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
+
     bots = [f for f in os.listdir(bot_dir) if f.endswith("_bot.py")]
     processes = []
     for bot in bots:
         bot_path = os.path.join(bot_dir, bot)
         logger.info(f"Starting bot: {bot}")
-        # Run as a separate process
         proc = await asyncio.create_subprocess_exec(
-            "python", bot_path,
+            sys.executable, bot_path,   # use same Python as server
+            env=env,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
+            stderr=asyncio.subprocess.PIPE,
         )
         processes.append(proc)
     return processes
@@ -47,13 +103,14 @@ async def start_bots():
 async def lifespan(app: FastAPI):
     # Startup
     await init_db()
+    await ensure_bots_registered()
     asyncio.create_task(start_voice_relay())
     if not os.path.exists(settings.UPLOAD_DIR):
         os.makedirs(settings.UPLOAD_DIR)
     logger.info("Database initialized and Voice Relay started")
-    
+
     bot_processes = await start_bots()
-    
+
     yield
     # Shutdown
     logger.info("Server shutting down")
@@ -78,9 +135,12 @@ app.add_middleware(
 
 @app.post("/register")
 async def register(payload: RegisterPayload, db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(User).where(or_(User.username == payload.username, User.email == payload.email)))
-    if result.scalars().first():
-        raise HTTPException(status_code=400, detail="Username or Email already registered")
+    taken_user = await db.execute(select(User).where(User.username == payload.username))
+    if taken_user.scalars().first():
+        raise HTTPException(status_code=400, detail="That Skype Name is already taken. Please choose another.")
+    taken_email = await db.execute(select(User).where(User.email == payload.email))
+    if taken_email.scalars().first():
+        raise HTTPException(status_code=400, detail="An account with that email already exists.")
     
     user = User(
         username=payload.username,
@@ -149,7 +209,8 @@ async def get_contacts(current_user: User = Depends(get_current_user), db: Async
         if bot.id not in contact_ids:
             contacts.append(bot)
 
-    return [{"id": c.id, "username": c.username, "display_name": c.display_name, "status": c.status} for c in contacts]
+    return [{"id": c.id, "username": c.username, "display_name": c.display_name,
+             "status": c.status, "mood_message": c.mood_message or ""} for c in contacts]
 
 @app.post("/contacts/add")
 async def add_contact(payload: ContactAddPayload, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -202,18 +263,61 @@ async def get_messages(conversation_id: str, current_user: User = Depends(get_cu
 
 @app.get("/users/search")
 async def search_users(query: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    stmt = select(User).where(or_(User.username.ilike(f"%{query}%"), User.display_name.ilike(f"%{query}%"))).limit(20)
+    stmt = (
+        select(User)
+        .where(
+            User.id != current_user.id,
+            or_(
+                User.username.ilike(f"%{query}%"),
+                User.display_name.ilike(f"%{query}%"),
+            ),
+        )
+        .limit(20)
+    )
     result = await db.execute(stmt)
     users = result.scalars().all()
-    return [{"id": u.id, "username": u.username, "display_name": u.display_name, "status": u.status} for u in users]
+    return [
+        {
+            "id":           u.id,
+            "username":     u.username,
+            "display_name": u.display_name,
+            "status":       u.status,
+            "mood_message": u.mood_message or "",
+            "is_bot":       "_service" in u.username,
+        }
+        for u in users
+    ]
 
 @app.post("/profile/update")
 async def update_profile(payload: ProfileUpdatePayload, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    if payload.display_name:
+    if payload.display_name is not None:
         current_user.display_name = payload.display_name
-    
+    if payload.mood is not None:
+        current_user.mood_message = payload.mood
+    if payload.country is not None:
+        current_user.country = payload.country
+    if payload.hometown is not None:
+        current_user.hometown = payload.hometown
+    if payload.birthday is not None:
+        current_user.birthday = payload.birthday
     await db.commit()
     return {"message": "Profile updated"}
+
+@app.get("/profile/me")
+async def get_my_profile(current_user: User = Depends(get_current_user)):
+    return {
+        "id":           current_user.id,
+        "username":     current_user.username,
+        "display_name": current_user.display_name,
+        "email":        current_user.email,
+        "first_name":   current_user.first_name,
+        "last_name":    current_user.last_name,
+        "mood_message": current_user.mood_message or "",
+        "country":      current_user.country or "",
+        "hometown":     current_user.hometown or "",
+        "birthday":     current_user.birthday or "",
+        "status":       current_user.status,
+    }
 
 # --- File Transfer ---
 

@@ -1,74 +1,201 @@
-import wx
+"""Settings dialog — Audio, Appearance, Devices tabs."""
+import os
+import threading
+import wave
+import numpy as np
 import structlog
+import wx
+import sounddevice as sd
 from shared.models import SettingsPayload
 
 logger = structlog.get_logger()
 
-class SettingsFrame(wx.Frame):
+_BLUE = wx.Colour(0, 120, 212)
+_SOUNDS_DIR = os.path.join("assets", "sounds")
+
+
+def _query_devices():
+    try:
+        devs = sd.query_devices()
+        inputs  = ["Default"] + [d["name"] for d in devs if d["max_input_channels"]  > 0]
+        outputs = ["Default"] + [d["name"] for d in devs if d["max_output_channels"] > 0]
+    except Exception:
+        inputs = outputs = ["Default"]
+    return inputs, outputs
+
+
+def _list_ringtones() -> list:
+    if not os.path.isdir(_SOUNDS_DIR):
+        return ["call_ring1.wav"]
+    return [f for f in os.listdir(_SOUNDS_DIR) if f.lower().endswith(".wav")] or ["call_ring1.wav"]
+
+
+class SettingsDialog(wx.Dialog):
+    """Application settings — opened with ShowModal()."""
+
     def __init__(self, parent, current_settings: SettingsPayload, on_save):
-        super().__init__(parent, title="Skype™ Reborn — Settings", size=(400, 300))
-        self.on_save = on_save
-        self.settings = current_settings
-        
-        self.panel = wx.Panel(self)
-        self.panel.SetName("Settings Panel")
-        
-        main_sizer = wx.BoxSizer(wx.VERTICAL)
-        
-        # Audio Section
-        audio_box = wx.StaticBox(self.panel, label="Audio Settings")
-        audio_sizer = wx.StaticBoxSizer(audio_box, wx.VERTICAL)
-        
-        self.ptt_checkbox = wx.CheckBox(self.panel, label="Enable &Push-to-Talk")
-        self.ptt_checkbox.SetValue(self.settings.push_to_talk)
-        self.ptt_checkbox.SetName("Enable Push-to-Talk")
-        audio_sizer.Add(self.ptt_checkbox, 0, wx.ALL, 5)
-        
-        self.sounds_checkbox = wx.CheckBox(self.panel, label="Enable &Notification Sounds")
-        self.sounds_checkbox.SetValue(self.settings.notification_sounds)
-        self.sounds_checkbox.SetName("Enable Notification Sounds")
-        audio_sizer.Add(self.sounds_checkbox, 0, wx.ALL, 5)
-        
-        main_sizer.Add(audio_sizer, 0, wx.EXPAND | wx.ALL, 10)
-        
-        # Appearance Section
-        theme_box = wx.StaticBox(self.panel, label="Appearance")
-        theme_sizer = wx.StaticBoxSizer(theme_box, wx.VERTICAL)
-        
-        theme_label = wx.StaticText(self.panel, label="&Theme:")
-        self.theme_choice = wx.Choice(self.panel, choices=["Classic", "Dark", "Modern"])
-        self.theme_choice.SetStringSelection(self.settings.theme)
-        self.theme_choice.SetName("Select Application Theme")
-        
-        theme_sizer.Add(theme_label, 0, wx.LEFT | wx.TOP, 5)
-        theme_sizer.Add(self.theme_choice, 0, wx.EXPAND | wx.ALL, 5)
-        
-        main_sizer.Add(theme_sizer, 0, wx.EXPAND | wx.ALL, 10)
-        
-        # Buttons
-        btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.save_btn = wx.Button(self.panel, label="&Save Settings")
-        self.save_btn.SetDefault()
-        self.cancel_btn = wx.Button(self.panel, label="&Cancel")
-        
-        btn_sizer.Add(self.save_btn, 0, wx.ALL, 5)
-        btn_sizer.Add(self.cancel_btn, 0, wx.ALL, 5)
-        
-        main_sizer.Add(btn_sizer, 0, wx.ALIGN_RIGHT | wx.ALL, 10)
-        
-        self.panel.SetSizer(main_sizer)
-        
-        # Bindings
-        self.save_btn.Bind(wx.EVT_BUTTON, self.OnSave)
-        self.cancel_btn.Bind(wx.EVT_BUTTON, lambda e: self.Close())
-        
+        super().__init__(
+            parent,
+            title="Skype™ Reborn — Settings",
+            size=(500, 400),
+            style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
+            name="Settings Dialog",
+        )
+        self.on_save   = on_save
+        self.settings  = current_settings
+        self._test_thd = None
+        self._build_ui()
         self.Centre()
 
-    def OnSave(self, event):
+    def _build_ui(self):
+        panel = wx.Panel(self)
+        panel.SetBackgroundColour(wx.WHITE)
+        root = wx.BoxSizer(wx.VERTICAL)
+
+        book = wx.Notebook(panel)
+
+        # ── Audio tab ────────────────────────────────────────────────
+        audio_pg = wx.Panel(book)
+        ap = wx.BoxSizer(wx.VERTICAL)
+        ap.Add(wx.StaticText(audio_pg, label="Voice & Sounds"), 0, wx.LEFT | wx.TOP, 16)
+        ap.Add(wx.StaticLine(audio_pg), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
+
+        self.ptt_cb = wx.CheckBox(audio_pg, label="Enable Push-to-Talk (hold Space to speak)", name="PTT")
+        self.ptt_cb.SetValue(self.settings.push_to_talk)
+        ap.Add(self.ptt_cb, 0, wx.ALL, 16)
+
+        self.sounds_cb = wx.CheckBox(audio_pg, label="Enable notification sounds", name="Sounds")
+        self.sounds_cb.SetValue(self.settings.notification_sounds)
+        ap.Add(self.sounds_cb, 0, wx.LEFT | wx.RIGHT | wx.BOTTOM, 16)
+
+        ap.Add(wx.StaticText(audio_pg, label="Ringtone:"), 0, wx.LEFT, 16)
+        self.ringtone_choice = wx.Choice(audio_pg, choices=_list_ringtones(), name="Ringtone")
+        if self.settings.ringtone in _list_ringtones():
+            self.ringtone_choice.SetStringSelection(self.settings.ringtone)
+        else:
+            self.ringtone_choice.SetSelection(0)
+        ap.Add(self.ringtone_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
+
+        audio_pg.SetSizer(ap)
+        book.AddPage(audio_pg, "Audio")
+
+        # ── Devices tab ──────────────────────────────────────────────
+        dev_pg = wx.Panel(book)
+        dp = wx.BoxSizer(wx.VERTICAL)
+        dp.Add(wx.StaticText(dev_pg, label="Audio Devices"), 0, wx.LEFT | wx.TOP, 16)
+        dp.Add(wx.StaticLine(dev_pg), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
+
+        inputs, outputs = _query_devices()
+
+        dp.Add(wx.StaticText(dev_pg, label="Input device (microphone):"), 0, wx.LEFT | wx.TOP, 16)
+        self.input_choice = wx.Choice(dev_pg, choices=inputs, name="Input Device")
+        if self.settings.input_device in inputs:
+            self.input_choice.SetStringSelection(self.settings.input_device)
+        else:
+            self.input_choice.SetSelection(0)
+        dp.Add(self.input_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        dp.Add(wx.StaticText(dev_pg, label="Output device (speakers/headphones):"), 0, wx.LEFT | wx.TOP, 16)
+        self.output_choice = wx.Choice(dev_pg, choices=outputs, name="Output Device")
+        if self.settings.output_device in outputs:
+            self.output_choice.SetStringSelection(self.settings.output_device)
+        else:
+            self.output_choice.SetSelection(0)
+        dp.Add(self.output_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        self.test_btn = wx.Button(dev_pg, label="Test Output Device (plays ringtone)", name="Test Device")
+        dp.Add(self.test_btn, 0, wx.LEFT | wx.TOP, 16)
+
+        dp.Add(wx.StaticText(dev_pg, label="Camera:"), 0, wx.LEFT | wx.TOP, 16)
+        self.camera_choice = wx.Choice(dev_pg, choices=["Default", "Built-in Camera"], name="Camera")
+        dp.Add(self.camera_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+
+        dev_pg.SetSizer(dp)
+        book.AddPage(dev_pg, "Devices")
+
+        # ── Appearance tab ───────────────────────────────────────────
+        app_pg = wx.Panel(book)
+        app_sz = wx.BoxSizer(wx.VERTICAL)
+        app_sz.Add(wx.StaticText(app_pg, label="Visual Style"), 0, wx.LEFT | wx.TOP, 16)
+        app_sz.Add(wx.StaticLine(app_pg), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
+        app_sz.Add(wx.StaticText(app_pg, label="Theme:"), 0, wx.LEFT | wx.TOP, 16)
+        self.theme_choice = wx.Choice(app_pg, choices=["Classic", "Dark", "Modern"], name="Theme")
+        self.theme_choice.SetStringSelection(self.settings.theme)
+        app_sz.Add(self.theme_choice, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 8)
+        note = wx.StaticText(app_pg, label="Restart Skype Reborn for theme changes to take full effect.")
+        f = note.GetFont(); f.SetPointSize(8); note.SetFont(f)
+        note.SetForegroundColour(wx.Colour(96, 94, 92))
+        app_sz.Add(note, 0, wx.LEFT | wx.TOP, 16)
+        app_pg.SetSizer(app_sz)
+        book.AddPage(app_pg, "Appearance")
+
+        root.Add(book, 1, wx.EXPAND | wx.ALL, 8)
+        root.Add(wx.StaticLine(panel), 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
+
+        btn_row = wx.BoxSizer(wx.HORIZONTAL)
+        btn_row.AddStretchSpacer()
+        cancel_btn = wx.Button(panel, wx.ID_CANCEL, "Cancel")
+        save_btn   = wx.Button(panel, wx.ID_OK, "Save")
+        save_btn.SetDefault()
+        btn_row.Add(cancel_btn, 0, wx.ALL, 8)
+        btn_row.Add(save_btn,   0, wx.RIGHT | wx.TOP | wx.BOTTOM, 8)
+        root.Add(btn_row, 0, wx.EXPAND)
+        panel.SetSizer(root)
+
+        save_btn.Bind(wx.EVT_BUTTON, self._on_save)
+        cancel_btn.Bind(wx.EVT_BUTTON, lambda e: self.EndModal(wx.ID_CANCEL))
+        self.test_btn.Bind(wx.EVT_BUTTON, self._on_test_device)
+        self.Bind(wx.EVT_CLOSE, lambda e: (self._stop_test(), e.Skip()))
+
+    # ── Device test ───────────────────────────────────────────────────
+
+    def _on_test_device(self, event):
+        if self.test_btn.GetLabel().startswith("Stop"):
+            self._stop_test()
+            return
+        ringtone = self.ringtone_choice.GetStringSelection()
+        path = os.path.join(_SOUNDS_DIR, ringtone)
+        if not os.path.exists(path):
+            wx.MessageBox(f"Ringtone file not found:\n{path}", "Error",
+                          wx.OK | wx.ICON_ERROR, self)
+            return
+        self.test_btn.SetLabel("Stop Test")
+        self._test_thd = threading.Thread(target=self._play_test, args=(path,), daemon=True)
+        self._test_thd.start()
+
+    def _play_test(self, path: str):
+        try:
+            with wave.open(path, "rb") as wf:
+                data = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16)
+                channels = wf.getnchannels()
+                fs = wf.getframerate()
+            if channels == 2:
+                data = data.reshape(-1, 2)
+            dev_name = self.output_choice.GetStringSelection()
+            dev = None if dev_name == "Default" else dev_name
+            sd.play(data, fs, device=dev, loop=True)
+            sd.wait()
+        except Exception as e:
+            logger.warning("Device test failed", error=str(e))
+        finally:
+            wx.CallAfter(self.test_btn.SetLabel, "Test Output Device (plays ringtone)")
+
+    def _stop_test(self):
+        sd.stop()
+        self.test_btn.SetLabel("Test Output Device (plays ringtone)")
+
+    # ── Save ──────────────────────────────────────────────────────────
+
+    def _on_save(self, event):
+        self._stop_test()
         new_settings = SettingsPayload(
-            push_to_talk=self.ptt_checkbox.GetValue(),
-            notification_sounds=self.sounds_checkbox.GetValue(),
-            theme=self.theme_choice.GetStringSelection()
+            push_to_talk=self.ptt_cb.GetValue(),
+            notification_sounds=self.sounds_cb.GetValue(),
+            theme=self.theme_choice.GetStringSelection(),
+            ringtone=self.ringtone_choice.GetStringSelection(),
+            input_device=self.input_choice.GetStringSelection(),
+            output_device=self.output_choice.GetStringSelection(),
+            camera_device=self.camera_choice.GetStringSelection(),
         )
         self.on_save(new_settings)
-        self.Close()
+        self.EndModal(wx.ID_OK)

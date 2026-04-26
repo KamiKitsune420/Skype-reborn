@@ -3,6 +3,15 @@ import wave
 import os
 import structlog
 from uuid import UUID
+try:
+    from opuslib import Encoder as OpusEncoder
+    OPUS_AVAILABLE = True
+except Exception:
+    OPUS_AVAILABLE = False
+    class OpusEncoder:
+        def __init__(self, *args, **kwargs): pass
+        def encode(self, pcm, frame_size): return pcm
+
 from server.bots.sdk import BotSDK
 from shared.models import Envelope, MessageType, CallSignalPayload, UserStatus
 
@@ -13,6 +22,11 @@ class EchoServiceBot:
     def __init__(self, bot_sdk: BotSDK):
         self.bot = bot_sdk
         self.active_calls: dict = {}  # session_id -> call state dict
+        try:
+            self.encoder = OpusEncoder(16000, 1, 'voip')
+        except Exception as e:
+            logger.error("EchoBot: failed to init OpusEncoder", error=str(e))
+            self.encoder = None
 
     def start(self):
         """Register all event handlers. Call this BEFORE bot_sdk.connect()."""
@@ -120,14 +134,21 @@ class EchoServiceBot:
 
         with wave.open(file_path, "rb") as wf:
             framerate = wf.getframerate()
-            chunk_size = 320
-            # Calculate correct sleep duration from the WAV's actual sample rate.
-            # Old code hard-coded 0.02 s which was wrong for anything other than 16 kHz.
+            chunk_size = 320 # 20ms at 16kHz
             chunk_duration = chunk_size / framerate
 
             data = wf.readframes(chunk_size)
             while data and call["is_active"]:
-                self._send_audio(session_id, data)
+                if self.encoder and len(data) == chunk_size * 2: # 16-bit PCM = 2 bytes per frame
+                    try:
+                        encoded = self.encoder.encode(data, chunk_size)
+                        self._send_audio(session_id, encoded)
+                    except Exception as e:
+                        logger.error("EchoBot: encoding error", error=str(e))
+                else:
+                    # Fallback or skip if wrong size
+                    pass
+
                 await asyncio.sleep(chunk_duration)
                 data = wf.readframes(chunk_size)
 

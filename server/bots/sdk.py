@@ -149,11 +149,11 @@ class BotSDK:
         payload = PresenceUpdatePayload(user_id=self.user_id, status=status)
         await self.send_envelope(Envelope(type=MessageType.PRESENCE_UPDATE, payload=payload.model_dump()))
 
-    def send_udp_packet(self, session_id: UUID, payload: bytes, seq: int = 0):
+    def send_udp_packet(self, session_id: UUID, payload: bytes, seq: int = 0, codec: int = 3):
         header = session_id.bytes
         header += struct.pack("!H", seq)
         header += struct.pack("!I", 0)
-        header += struct.pack("!B", 2)
+        header += struct.pack("!B", codec)
         header += struct.pack("!H", len(payload))
         try:
             self.udp_socket.sendto(header + payload, self.udp_addr)

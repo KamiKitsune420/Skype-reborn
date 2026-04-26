@@ -74,6 +74,12 @@ class ProfileUpdatePayload(BaseModel):
     user_id: str
     display_name: Optional[str] = None
     avatar_url: Optional[str] = None
+    mood: Optional[str] = None
+
+class SettingsPayload(BaseModel):
+    push_to_talk: bool = False
+    notification_sounds: bool = True
+    theme: str = "Classic"
 
 class ChatMessagePayload(BaseModel):
     conversation_id: str

@@ -97,11 +97,8 @@ class LoginFrame(wx.Frame):
         rv.Add(reg_grid, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 30)
 
         reg_btn_row = wx.BoxSizer(wx.HORIZONTAL)
-        self.back_btn = wx.Button(self.register_view, label="&Back", size=(100, 35),
-                                   name="Back to Login Button")
         self.do_reg_btn = wx.Button(self.register_view, label="&Register", size=(100, 35),
                                      name="Register Action Button")
-        reg_btn_row.Add(self.back_btn, 0, wx.RIGHT, 15)
         reg_btn_row.Add(self.do_reg_btn)
         rv.Add(reg_btn_row, 0, wx.ALIGN_CENTER | wx.BOTTOM, 25)
 
@@ -119,12 +116,18 @@ class LoginFrame(wx.Frame):
         self.login_btn.Bind(wx.EVT_BUTTON, self.OnLogin)
         self.do_reg_btn.Bind(wx.EVT_BUTTON, self.OnRegister)
         self.to_reg_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_view("register"))
-        self.back_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_view("login"))
 
     def _show_view(self, which: str):
         self.login_view.Show(which == "login")
         self.register_view.Show(which == "register")
         self.status_text.SetLabel("")
+        # Use Hide/Show to ensure they are physically removed from layout flow
+        if which == "login":
+            self.register_view.Hide()
+            self.login_view.Show()
+        else:
+            self.login_view.Hide()
+            self.register_view.Show()
         self.panel.Layout()
 
     # ── Login ────────────────────────────────────────────────────────
@@ -164,7 +167,7 @@ class LoginFrame(wx.Frame):
         keys = ["username", "password", "email", "first_name", "last_name"]
         data = {k: c.GetValue().strip() for k, c in zip(keys, self._reg_ctrls)}
         if any(not v for v in data.values()):
-            self.status_text.SetLabel("All fields are required.")
+            wx.MessageBox("All fields are required.", "Registration", wx.OK | wx.ICON_WARNING)
             return
         self.status_text.SetLabel("Creating account…")
         self.do_reg_btn.Disable()
@@ -177,7 +180,12 @@ class LoginFrame(wx.Frame):
     def _on_register_done(self, success: bool, msg: str):
         self.do_reg_btn.Enable()
         if success:
-            self.status_text.SetLabel("Account created. You can now sign in.")
+            wx.MessageBox("Account created successfully. You can now sign in.", 
+                          "Registration Success", wx.OK | wx.ICON_INFORMATION)
+            for c in self._reg_ctrls:
+                c.Clear()
             self._show_view("login")
         else:
+            wx.MessageBox(f"Registration failed: {msg}", 
+                          "Registration Error", wx.OK | wx.ICON_ERROR)
             self.status_text.SetLabel(f"Failed: {msg}")

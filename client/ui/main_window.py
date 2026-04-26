@@ -26,7 +26,10 @@ from shared.models import (
     Envelope, MessageType,
     ChatMessagePayload, CallSignalPayload,
     ChatTypingPayload, PresenceUpdatePayload,
+    SettingsPayload,
 )
+from .settings import SettingsFrame
+from .find_people import FindPeopleDialog
 
 logger = structlog.get_logger()
 
@@ -42,6 +45,7 @@ class MainWindow(wx.Frame):
         self.api_client = api_client
         self.ws_client = ws_client
         self.user_data = user_data
+        self.settings = SettingsPayload() # Default settings
 
         self.contacts: list = []
         self.search_results: list = []
@@ -78,6 +82,8 @@ class MainWindow(wx.Frame):
 
         self._build_ui()
         self.CreateMenus()
+        self.CreateStatusBar()
+        self.SetStatusText("Ready")
         self.Centre()
         self.SetupShortcuts()
 
@@ -95,14 +101,12 @@ class MainWindow(wx.Frame):
 
         self.Bind(wx.EVT_MENU, lambda e: self._answer_if_ringing(), id=ID_ANSWER)
         self.Bind(wx.EVT_MENU, lambda e: self.HangUp() if self.is_calling else None, id=ID_HANGUP)
-        self.Bind(wx.EVT_MENU, lambda e: self.search_ctrl.SetFocus(), id=ID_SEARCH)
         self.Bind(wx.EVT_MENU, lambda e: self.OnRecentsFocus(e), id=ID_RECENTS)
         self.Bind(wx.EVT_MENU, lambda e: self.OnContactsFocus(e), id=ID_CONTACTS)
 
         self.SetAcceleratorTable(wx.AcceleratorTable([
             (wx.ACCEL_ALT, wx.WXK_PAGEUP,              ID_ANSWER),
             (wx.ACCEL_ALT, wx.WXK_PAGEDOWN,            ID_HANGUP),
-            (wx.ACCEL_CTRL | wx.ACCEL_SHIFT, ord('S'), ID_SEARCH),
             (wx.ACCEL_ALT, ord('1'),                   ID_RECENTS),
             (wx.ACCEL_ALT, ord('2'),                   ID_CONTACTS),
             (wx.ACCEL_CTRL, ord(','),                  wx.ID_PREFERENCES),
@@ -117,32 +121,40 @@ class MainWindow(wx.Frame):
     def CreateMenus(self):
         bar = wx.MenuBar()
 
+        # Skype Menu
         skype = wx.Menu()
-        skype.Append(wx.ID_ANY, "Online &Status")
+        skype.Append(wx.ID_ANY, "New &Conversation…\tCtrl+N")
+        skype.AppendSeparator()
+        
+        # Status Submenu
+        status_menu = wx.Menu()
+        for s in ("ONLINE", "AWAY", "BUSY", "INVISIBLE"):
+            item = status_menu.Append(wx.ID_ANY, s.capitalize())
+            # Capture status string properly in lambda
+            self.Bind(wx.EVT_MENU, lambda e, st=s: self._send_presence(st), item)
+        skype.AppendSubMenu(status_menu, "&Change Status")
+        
+        skype.Append(wx.ID_ANY, "Set &Mood Message…")
+        skype.AppendSeparator()
         skype.Append(wx.ID_PREFERENCES, "S&ettings…\tCtrl+,")
         skype.AppendSeparator()
-        skype.Append(wx.ID_EXIT, "E&xit")
+        skype.Append(wx.ID_EXIT, "Sign &Out")
 
-        contacts = wx.Menu()
-        contacts.Append(wx.ID_ANY, "&Add Contact…")
-        contacts.Append(wx.ID_ANY, "&Search for Skype Users…\tCtrl+Shift+S")
+        # View Menu
+        view = wx.Menu()
+        view.Append(wx.ID_ANY, "&Recent Conversations\tAlt+1")
+        view.Append(wx.ID_ANY, "&Contacts\tAlt+2")
+        view.AppendSeparator()
+        view.Append(wx.ID_ANY, "&Profile")
 
-        convo = wx.Menu()
-        convo.Append(wx.ID_ANY, "&Send File…\tCtrl+Shift+F")
-
-        call = wx.Menu()
-        call.Append(wx.ID_ANY, "&Call\tAlt+C")
-        call.Append(wx.ID_ANY, "&Hang Up\tAlt+H")
-
+        # Help Menu
         help_ = wx.Menu()
         help_.Append(wx.ID_HELP, "&Help Topics\tCtrl+H")
         help_.Append(wx.ID_ABOUT, "&About Skype Reborn")
 
-        bar.Append(skype,    "&Skype")
-        bar.Append(contacts, "&Contacts")
-        bar.Append(convo,    "Con&versation")
-        bar.Append(call,     "Ca&ll")
-        bar.Append(help_,    "&Help")
+        bar.Append(skype, "&Skype")
+        bar.Append(view,  "&View")
+        bar.Append(help_, "&Help")
 
         self.SetMenuBar(bar)
         self.Bind(wx.EVT_MENU, lambda e: self.Close(), id=wx.ID_EXIT)
@@ -180,35 +192,23 @@ class MainWindow(wx.Frame):
         self.profile_name.SetForegroundColour(wx.WHITE)
 
         self.status_btn = wx.Button(prof, label="▼", size=(22, 22),
-                                     style=wx.BU_EXACTFIT, name="Change Status Button")
-        self.status_btn.SetToolTip("Change your online status")
+                                     style=wx.BU_EXACTFIT, name="Status and Mood Menu")
+        self.status_btn.SetToolTip("Change your online status or mood")
 
         prof_row.Add(self.profile_name, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 4)
         prof_row.Add(self.status_btn,   0, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 8)
         prof.SetSizer(prof_row)
         sb.Add(prof, 0, wx.EXPAND)
 
-        # Search
-        self.search_label = wx.StaticText(sidebar, label="&Search users", name="Search Label")
-        self.search_ctrl = wx.SearchCtrl(sidebar, style=wx.TE_PROCESS_ENTER,
-                                          name="Global User Search")
-        self.search_ctrl.SetDescriptiveText("Search Skype users…")
-        sb.Add(self.search_label, 0, wx.LEFT | wx.RIGHT | wx.TOP, 8)
-        sb.Add(self.search_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 8)
+        # Actions Row (View Profile, Find People)
+        actions = wx.BoxSizer(wx.HORIZONTAL)
+        self.profile_btn = wx.Button(sidebar, label="&View Profile", name="View My Profile")
+        self.find_btn = wx.Button(sidebar, label="&Find People", name="Search for People")
+        actions.Add(self.profile_btn, 1, wx.EXPAND | wx.ALL, 5)
+        actions.Add(self.find_btn, 1, wx.EXPAND | wx.ALL, 5)
+        sb.Add(actions, 0, wx.EXPAND)
 
-        # Tabs
-        tabs = wx.BoxSizer(wx.HORIZONTAL)
-        self.recents_btn = wx.Button(sidebar, label="&Recent",
-                                      style=wx.BU_EXACTFIT | wx.BORDER_NONE,
-                                      name="Recent Chats Tab")
-        self.contacts_btn = wx.Button(sidebar, label="&Contacts",
-                                       style=wx.BU_EXACTFIT | wx.BORDER_NONE,
-                                       name="Contacts List Tab")
-        tabs.Add(self.recents_btn, 1, wx.EXPAND)
-        tabs.Add(self.contacts_btn, 1, wx.EXPAND)
-        sb.Add(tabs, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 8)
-
-        self.list_label = wx.StaticText(sidebar, label="CONTACTS", name="List Header Label")
+        self.list_label = wx.StaticText(sidebar, label="CONTACTS", name="List Content Header")
         self.list_label.SetForegroundColour(wx.Colour(100, 100, 100))
         lf = self.list_label.GetFont()
         lf.SetPointSize(8)
@@ -217,7 +217,7 @@ class MainWindow(wx.Frame):
 
         self.contact_list = wx.ListBox(sidebar, style=wx.LB_SINGLE | wx.BORDER_NONE,
                                         name="Contact and Search List")
-        self.contact_list.SetBackgroundColour(wx.Colour(245, 245, 245))
+        self.contact_list.SetToolTip("Select a contact to start chatting")
         sb.Add(self.contact_list, 1, wx.EXPAND)
 
         sidebar.SetSizer(sb)
@@ -315,16 +315,46 @@ class MainWindow(wx.Frame):
         self.call_btn.Bind(wx.EVT_BUTTON, self.OnCall)
         self.file_btn.Bind(wx.EVT_BUTTON, self.OnSendFile)
         self.status_btn.Bind(wx.EVT_BUTTON, self.OnStatusMenu)
-        self.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, self.OnSearch)
-        self.search_ctrl.Bind(wx.EVT_TEXT_ENTER, self.OnSearch)
-        self.search_ctrl.Bind(wx.EVT_TEXT, self.OnSearchText)
-        self.message_input.Bind(wx.EVT_TEXT_ENTER, self.OnSend)
-        self.message_input.Bind(wx.EVT_TEXT, self.OnTyping)
+        self.profile_btn.Bind(wx.EVT_BUTTON, self.OnViewProfile)
+        self.find_btn.Bind(wx.EVT_BUTTON, self.OnFindPeople)
+        
         self.contact_list.Bind(wx.EVT_LISTBOX, self.OnContactSelected)
         self.contact_list.Bind(wx.EVT_LISTBOX_DCLICK, self.OnContactActivated)
-        self.recents_btn.Bind(wx.EVT_BUTTON, self.OnRecentsFocus)
-        self.contacts_btn.Bind(wx.EVT_BUTTON, self.OnContactsFocus)
         self.Bind(wx.EVT_CLOSE, self.OnClose)
+        self.Bind(wx.EVT_MENU, self.OnSettings, id=wx.ID_PREFERENCES)
+
+    # ── Actions ──────────────────────────────────────────────────────
+
+    def OnViewProfile(self, event):
+        # Simplified: Show user data in a message box
+        msg = f"Skype Name: {self.user_data['username']}\n"
+        msg += f"Display Name: {self.user_data.get('display_name', 'Not set')}"
+        wx.MessageBox(msg, "My Profile", wx.OK | wx.ICON_INFORMATION)
+        self.SetStatusText("Viewing profile")
+
+    def OnFindPeople(self, event):
+        def do_search(query):
+            self.SetStatusText(f"Searching for '{query}'...")
+            return self.api_client.search_users(query)
+            
+        def do_add(user):
+            self.api_client.add_contact(user["username"])
+            self.SetStatusText(f"Added {user['display_name']} to contacts")
+            self._pool.submit(self._bg_load_contacts)
+
+        dlg = FindPeopleDialog(self, do_search, do_add)
+        dlg.ShowModal()
+        dlg.Destroy()
+
+    def OnSettings(self, event):
+        def save_settings(new_settings):
+            self.settings = new_settings
+            self.SetStatusText("Settings saved")
+            # Apply settings (e.g. if we had theme switching logic)
+            
+        dlg = SettingsFrame(self, self.settings, save_settings)
+        dlg.ShowModal()
+        dlg.Destroy()
 
     # ── App close ────────────────────────────────────────────────────
 
@@ -376,12 +406,14 @@ class MainWindow(wx.Frame):
         self.list_label.SetLabel("RECENT CONVERSATIONS")
         self.UpdateContactList()
         self.contact_list.SetFocus()
+        self.SetStatusText("Switched to Recent Conversations tab")
 
     def OnContactsFocus(self, event):
         self.is_searching = False
         self.list_label.SetLabel("CONTACTS")
         self.UpdateContactList()
         self.contact_list.SetFocus()
+        self.SetStatusText("Switched to Contacts tab")
 
     # ── Sounds ───────────────────────────────────────────────────────
 
@@ -423,12 +455,16 @@ class MainWindow(wx.Frame):
         if self.is_searching:
             self.list_label.SetLabel("SEARCH RESULTS")
             new_items = [u["display_name"] for u in self.search_results]
+            if not new_items:
+                new_items = ["No results found."]
         else:
             self.contacts.sort(key=lambda c: (c["status"] != "ONLINE", c["display_name"]))
             new_items = [
                 f"{'●' if c['status'] == 'ONLINE' else '○'} {c['display_name']}"
                 for c in self.contacts
             ]
+            if not new_items:
+                new_items = ["No contacts found."]
 
         if list(self.contact_list.GetStrings()) == new_items:
             return  # Nothing changed — skip the redraw

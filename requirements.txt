@@ -12,3 +12,6 @@ sounddevice
 numpy
 python-jose[cryptography]
 websockets
+opuslib
+webrtcvad
+cryptography

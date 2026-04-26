@@ -131,9 +131,24 @@ async def login(payload: LoginPayload, db: AsyncSession = Depends(get_db)):
 
 @app.get("/contacts")
 async def get_contacts(current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # 1. Get explicit contacts
     stmt = select(User).join(Contact, Contact.contact_user_id == User.id).where(Contact.user_id == current_user.id)
     result = await db.execute(stmt)
-    contacts = result.scalars().all()
+    contacts = list(result.scalars().all())
+    
+    # 2. Add System Bots (all users that are not the current user and are bots)
+    # For simplicity, we assume users with "echo_service" or registered via init_bots are bots.
+    # In a real app, you'd have an 'is_bot' flag in the User model.
+    bot_stmt = select(User).where(User.username.like("%_service%"), User.id != current_user.id)
+    bot_result = await db.execute(bot_stmt)
+    bots = bot_result.scalars().all()
+    
+    # Merge unique
+    contact_ids = {c.id for c in contacts}
+    for bot in bots:
+        if bot.id not in contact_ids:
+            contacts.append(bot)
+
     return [{"id": c.id, "username": c.username, "display_name": c.display_name, "status": c.status} for c in contacts]
 
 @app.post("/contacts/add")

@@ -1,9 +1,20 @@
-from typing import List
+import secrets
+from typing import List, Optional
+
+import structlog
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+logger = structlog.get_logger()
+
+
+def _dev_secret_key() -> str:
+    return secrets.token_urlsafe(48)
+
 
 class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./skype_reborn.db"
-    SECRET_KEY: str  # Must be set via SECRET_KEY env var or .env file
+    SECRET_KEY: Optional[str] = Field(default_factory=_dev_secret_key)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     UPLOAD_DIR: str = "server/uploads"
@@ -14,3 +25,12 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env")
 
 settings = Settings()
+
+if not settings.SECRET_KEY:
+    raise RuntimeError("SECRET_KEY must not be empty")
+
+if "SECRET_KEY" not in settings.model_fields_set:
+    logger.warning(
+        "SECRET_KEY is not set; using a temporary development key. "
+        "Existing login tokens will be invalid after restart. Set SECRET_KEY in .env for stable tokens."
+    )

@@ -3,6 +3,7 @@ import wx
 import structlog
 from .network.api_client import APIClient
 from .network.ws_client import WSClient
+from .services.auth import AuthService
 
 logger = structlog.get_logger()
 
@@ -13,6 +14,7 @@ class SkypeRebornApp:
     def __init__(self):
         self.app = wx.App()
         self.api_client = APIClient(_SERVER_URL)
+        self.auth_service = AuthService(self.api_client)
         self.ws_client = WSClient(_SERVER_URL, self.api_client)
         self.login_frame = None
         self.main_window = None
@@ -35,6 +37,6 @@ class SkypeRebornApp:
 
     def run(self):
         from .ui.login import LoginFrame
-        self.login_frame = LoginFrame(self.api_client, self.on_login_success)
+        self.login_frame = LoginFrame(self.auth_service, self.on_login_success)
         self.login_frame.Show()
         self.app.MainLoop()

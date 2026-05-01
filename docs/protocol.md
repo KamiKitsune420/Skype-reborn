@@ -34,6 +34,15 @@ All signaling messages are wrapped in a standard JSON envelope:
 - `CHAT_ACK`: Acknowledgment of message delivery.
 - `CHAT_TYPING`: Notification that a user is typing.
 
+For direct 1:1 messages, clients send the other user's id in
+`payload.conversation_id`. The server maps that pair to an internal
+conversation record, ignores any client-supplied sender identity, and delivers
+events with `payload.sender_id` set to the authenticated sender.
+
+Offline direct messages are stored server-side with delivery metadata. When a
+user reconnects to the WebSocket gateway, undelivered messages are replayed in
+timestamp order and marked delivered after a successful WebSocket send.
+
 ### 3.4 Call Signaling
 - `CALL_INITIATE`: Start a new call.
 - `CALL_RINGING`: Receiver is being alerted.

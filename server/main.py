@@ -3,6 +3,7 @@ import os
 import sys
 import aiofiles
 from contextlib import asynccontextmanager
+from datetime import datetime
 from typing import List, Dict, Any
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +11,17 @@ from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from uuid import uuid4
-from .database import get_db, init_db, User, Message as DBMessage, Contact, FileTransfer, SessionLocal
+from .database import (
+    get_db,
+    init_db,
+    User,
+    Message as DBMessage,
+    Contact,
+    Conversation,
+    ConversationParticipant,
+    FileTransfer,
+    SessionLocal,
+)
 from .auth import get_password_hash, verify_password, create_access_token, get_current_user
 from .voice_relay import start_voice_relay
 from .manager import manager
@@ -35,6 +46,91 @@ _BOT_ACCOUNTS = [
         "display_name": "Echo / Sound Test",
     },
 ]
+
+
+def _is_bot_user(user: User) -> bool:
+    return user.username.endswith("_service")
+
+
+def _direct_conversation_key(user_a: str, user_b: str) -> str:
+    return "|".join(sorted([user_a, user_b]))
+
+
+async def _get_user_by_id_or_username(db: AsyncSession, identifier: str) -> User | None:
+    result = await db.execute(
+        select(User).where(or_(User.id == identifier, User.username == identifier))
+    )
+    return result.scalars().first()
+
+
+async def _users_can_message(db: AsyncSession, sender: User, target: User) -> bool:
+    if sender.id == target.id:
+        return False
+    if _is_bot_user(sender) or _is_bot_user(target):
+        return True
+    result = await db.execute(
+        select(Contact).where(
+            Contact.user_id == sender.id,
+            Contact.contact_user_id == target.id,
+            Contact.status == "ACCEPTED",
+        )
+    )
+    return result.scalars().first() is not None
+
+
+async def _get_or_create_direct_conversation(
+    db: AsyncSession, user_a: str, user_b: str
+) -> Conversation:
+    direct_key = _direct_conversation_key(user_a, user_b)
+    result = await db.execute(
+        select(Conversation).where(Conversation.direct_key == direct_key)
+    )
+    conversation = result.scalars().first()
+    if conversation:
+        return conversation
+
+    conversation = Conversation(type="direct", direct_key=direct_key)
+    db.add(conversation)
+    await db.flush()
+    db.add_all(
+        [
+            ConversationParticipant(conversation_id=conversation.id, user_id=user_a),
+            ConversationParticipant(conversation_id=conversation.id, user_id=user_b),
+        ]
+    )
+    await db.flush()
+    return conversation
+
+
+def _message_payload_for_recipient(message: DBMessage) -> ChatMessagePayload:
+    return ChatMessagePayload(
+        conversation_id=message.sender_id,
+        sender_id=message.sender_id,
+        content=message.content,
+        message_type=message.message_type,
+        timestamp=message.timestamp,
+    )
+
+
+async def _deliver_offline_messages(user_id: str):
+    async with SessionLocal() as db:
+        result = await db.execute(
+            select(DBMessage)
+            .where(DBMessage.recipient_id == user_id, DBMessage.delivered_at.is_(None))
+            .order_by(DBMessage.timestamp.asc())
+        )
+        messages = result.scalars().all()
+        delivered_any = False
+        for message in messages:
+            envelope = Envelope(
+                type=MessageType.CHAT_RECEIVE,
+                payload=_message_payload_for_recipient(message).model_dump(),
+            )
+            if await manager.send_personal_message(envelope.model_dump_json(), user_id):
+                message.delivered_at = datetime.utcnow()
+                delivered_any = True
+        if delivered_any:
+            await db.commit()
 
 async def ensure_bots_registered():
     """Create bot accounts that don't yet exist and wire them as contacts for all users."""
@@ -164,17 +260,6 @@ async def register(payload: RegisterPayload, db: AsyncSession = Depends(get_db))
             db.add(contact)
     
     await db.commit()
-    
-    # NEW: Also ensure all existing users have echo_service as a contact
-    # This handles the case where users registered before the bot
-    stmt = select(User).where(User.id != user.id)
-    all_users = await db.execute(stmt)
-    for other_user in all_users.scalars().all():
-        exists = await db.execute(select(Contact).where(Contact.user_id == other_user.id, Contact.contact_user_id == user.id))
-        if not exists.scalars().first():
-            db.add(Contact(user_id=other_user.id, contact_user_id=user.id))
-    
-    await db.commit()
     return {"message": "User registered successfully"}
 
 @app.post("/login")
@@ -210,7 +295,8 @@ async def get_contacts(current_user: User = Depends(get_current_user), db: Async
             contacts.append(bot)
 
     return [{"id": c.id, "username": c.username, "display_name": c.display_name,
-             "status": c.status, "mood_message": c.mood_message or ""} for c in contacts]
+             "status": c.status, "mood_message": c.mood_message or "",
+             "is_bot": _is_bot_user(c)} for c in contacts]
 
 @app.post("/contacts/add")
 async def add_contact(payload: ContactAddPayload, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -244,19 +330,21 @@ async def add_contact(payload: ContactAddPayload, current_user: User = Depends(g
 
 @app.get("/messages/{conversation_id}")
 async def get_messages(conversation_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
-    # Only allow access if the requesting user is a participant in this conversation.
-    # conversation_id is the other user's ID; verify a contact relationship exists.
-    if current_user.id != conversation_id:
-        contact_check = await db.execute(
-            select(Contact).where(
-                Contact.user_id == current_user.id,
-                Contact.contact_user_id == conversation_id,
-            )
-        )
-        if not contact_check.scalars().first():
-            raise HTTPException(status_code=403, detail="Access denied")
+    peer = await _get_user_by_id_or_username(db, conversation_id)
+    if not peer:
+        raise HTTPException(status_code=404, detail="Conversation user not found")
+    if not await _users_can_message(db, current_user, peer):
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    stmt = select(DBMessage).where(DBMessage.conversation_id == conversation_id).order_by(DBMessage.timestamp.asc())
+    direct_key = _direct_conversation_key(current_user.id, peer.id)
+    conv_res = await db.execute(
+        select(Conversation).where(Conversation.direct_key == direct_key)
+    )
+    conversation = conv_res.scalars().first()
+    if not conversation:
+        return []
+
+    stmt = select(DBMessage).where(DBMessage.conversation_id == conversation.id).order_by(DBMessage.timestamp.asc())
     result = await db.execute(stmt)
     messages = result.scalars().all()
     return messages
@@ -384,6 +472,7 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
     user_id = await manager.connect(ticket, websocket)
     if not user_id:
         return
+    await _deliver_offline_messages(user_id)
     
     # Send initial statuses of contacts
     async with SessionLocal() as db:
@@ -402,19 +491,38 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
                 if envelope.type == MessageType.CHAT_SEND:
                     chat_payload = ChatMessagePayload(**envelope.payload)
                     async with SessionLocal() as db:
+                        sender = await _get_user_by_id_or_username(db, user_id)
+                        target = await _get_user_by_id_or_username(db, chat_payload.conversation_id)
+                        if not sender or not target:
+                            raise ValueError("Target user not found")
+                        if not await _users_can_message(db, sender, target):
+                            raise ValueError("You are not allowed to message this user")
+                        conversation = await _get_or_create_direct_conversation(
+                            db, sender.id, target.id
+                        )
                         db_msg = DBMessage(
-                            conversation_id=chat_payload.conversation_id,
+                            conversation_id=conversation.id,
                             sender_id=user_id,
-                            content=chat_payload.content
+                            recipient_id=target.id,
+                            content=chat_payload.content,
+                            message_type=chat_payload.message_type,
                         )
                         db.add(db_msg)
                         await db.commit()
                     
-                    resp = Envelope(type=MessageType.CHAT_RECEIVE, payload=chat_payload.model_dump())
-                    if chat_payload.conversation_id == "echo_service":
-                        await manager.send_personal_message(resp.model_dump_json(), user_id)
-                    else:
-                        await manager.send_personal_message(resp.model_dump_json(), chat_payload.conversation_id)
+                    resp = Envelope(
+                        type=MessageType.CHAT_RECEIVE,
+                        payload=_message_payload_for_recipient(db_msg).model_dump(),
+                    )
+                    if await manager.send_personal_message(resp.model_dump_json(), db_msg.recipient_id):
+                        async with SessionLocal() as db:
+                            res = await db.execute(
+                                select(DBMessage).where(DBMessage.id == db_msg.id)
+                            )
+                            delivered_msg = res.scalars().first()
+                            if delivered_msg:
+                                delivered_msg.delivered_at = datetime.utcnow()
+                                await db.commit()
 
                 elif envelope.type == MessageType.PRESENCE_UPDATE:
                     presence_payload = PresenceUpdatePayload(**envelope.payload)
@@ -426,12 +534,43 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
                             await db.commit()
                             await manager.broadcast_presence(user_id, presence_payload.status)
 
+                elif envelope.type == MessageType.CHAT_TYPING:
+                    typing_payload = ChatTypingPayload(**envelope.payload)
+                    async with SessionLocal() as db:
+                        sender = await _get_user_by_id_or_username(db, user_id)
+                        target = await _get_user_by_id_or_username(db, typing_payload.conversation_id)
+                        if not sender or not target:
+                            raise ValueError("Target user not found")
+                        if not await _users_can_message(db, sender, target):
+                            raise ValueError("You are not allowed to message this user")
+                    normalized = ChatTypingPayload(
+                        conversation_id=user_id,
+                        user_id=user_id,
+                        is_typing=typing_payload.is_typing,
+                    )
+                    resp = Envelope(type=MessageType.CHAT_TYPING, payload=normalized.model_dump())
+                    await manager.send_personal_message(resp.model_dump_json(), target.id)
+
                 elif envelope.type in [MessageType.CALL_INITIATE, MessageType.CALL_ACCEPT, 
                                      MessageType.CALL_REJECT, MessageType.CALL_HANGUP,
                                      MessageType.CALL_RINGING, MessageType.CALL_CANDIDATE,
                                      MessageType.CALL_CONNECTING]:
                     call_payload = CallSignalPayload(**envelope.payload)
-                    await manager.send_personal_message(data, call_payload.target_id)
+                    async with SessionLocal() as db:
+                        sender = await _get_user_by_id_or_username(db, user_id)
+                        target = await _get_user_by_id_or_username(db, call_payload.target_id)
+                        if not sender or not target:
+                            raise ValueError("Target user not found")
+                        if not await _users_can_message(db, sender, target):
+                            raise ValueError("You are not allowed to call this user")
+                    normalized = CallSignalPayload(
+                        session_id=call_payload.session_id,
+                        target_id=target.id,
+                        sender_id=user_id,
+                        data=call_payload.data,
+                    )
+                    resp = Envelope(type=envelope.type, payload=normalized.model_dump())
+                    await manager.send_personal_message(resp.model_dump_json(), target.id)
                 
             except Exception as e:
                 logger.error("Error processing message", error=str(e))

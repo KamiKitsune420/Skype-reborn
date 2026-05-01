@@ -25,6 +25,11 @@ A production-ready Skype 7-style clone built with Python, wxPython, and asyncio.
    ```bash
    pip install -r requirements.txt
    ```
+4. **Create local configuration:**
+   ```bash
+   copy .env.example .env
+   ```
+   Replace `SECRET_KEY` with a long random value before hosting the server.
 
 ## How to Run
 
@@ -40,7 +45,7 @@ The server starts at `http://127.0.0.1:8000`.
 python scripts/init_bots.py
 
 # Start the bot process
-python bots/echo_service_bot.py
+python server/bots/echo_service_bot.py
 ```
 
 ### 3. Launch the Desktop Client
@@ -65,5 +70,5 @@ Open `web/index.html` in your favorite web browser.
 - `server/`: FastAPI backend and Voice Relay.
 - `client/`: wxPython Desktop application.
 - `web/`: Modern Web interface (HTML/JS/Bootstrap).
-- `bots/`: Bot SDK and Echo Service bot.
+- `server/bots/`: Bot SDK and Echo Service bot.
 - `shared/`: Protocol models.

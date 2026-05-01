@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, DateTime, ForeignKey, Text, Integer, text
+from sqlalchemy import String, DateTime, ForeignKey, Text, Integer, UniqueConstraint, text
 from typing import Optional
 from datetime import datetime
 from uuid import uuid4
@@ -37,8 +37,28 @@ class Message(Base):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
     conversation_id: Mapped[str] = mapped_column(String, index=True)
     sender_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"))
+    recipient_id: Mapped[Optional[str]] = mapped_column(String, ForeignKey("users.id"), nullable=True, index=True)
     content: Mapped[str] = mapped_column(Text)
+    message_type: Mapped[str] = mapped_column(String, default="text")
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    type: Mapped[str] = mapped_column(String, default="direct")
+    direct_key: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+class ConversationParticipant(Base):
+    __tablename__ = "conversation_participants"
+    __table_args__ = (UniqueConstraint("conversation_id", "user_id", name="uq_conversation_user"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=lambda: str(uuid4()))
+    conversation_id: Mapped[str] = mapped_column(String, ForeignKey("conversations.id"), index=True)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id"), index=True)
+    joined_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 class Contact(Base):
     __tablename__ = "contacts"
@@ -74,6 +94,16 @@ async def init_db():
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {sql_type}"))
+            except Exception:
+                pass  # column already exists
+
+        for col, sql_type in [
+            ("recipient_id",  "TEXT"),
+            ("message_type",  "TEXT DEFAULT 'text'"),
+            ("delivered_at",  "DATETIME"),
+        ]:
+            try:
+                await conn.execute(text(f"ALTER TABLE messages ADD COLUMN {col} {sql_type}"))
             except Exception:
                 pass  # column already exists
 

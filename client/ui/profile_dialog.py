@@ -16,7 +16,7 @@ _AVATAR_DIR = os.path.join("assets", "avatars")
 class ProfileDialog(wx.Dialog):
     """View and edit the signed-in user's profile."""
 
-    def __init__(self, parent, api_client, user_data: dict):
+    def __init__(self, parent, data_service, user_data: dict):
         super().__init__(
             parent,
             title="My Profile",
@@ -24,7 +24,7 @@ class ProfileDialog(wx.Dialog):
             style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER,
             name="Profile Dialog",
         )
-        self.api_client  = api_client
+        self.data_service = data_service
         self.user_data   = user_data
         self._avatar_bmp = None
         self._build_ui()
@@ -138,7 +138,7 @@ class ProfileDialog(wx.Dialog):
     # ── Load profile from server ──────────────────────────────────────
 
     def _load_profile(self):
-        data = self.api_client.get_profile()
+        data = self.data_service.get_profile()
         wx.CallAfter(self._populate, data)
 
     def _populate(self, data: dict):
@@ -190,7 +190,7 @@ class ProfileDialog(wx.Dialog):
         threading.Thread(target=self._do_save, daemon=True).start()
 
     def _do_save(self):
-        ok = self.api_client.update_profile(
+        ok = self.data_service.update_profile(
             display_name=self.f_display.GetValue().strip(),
             mood=self.f_mood.GetValue().strip(),
             country=self.f_country.GetValue().strip(),

@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, List, Optional
 from uuid import uuid4
 from fastapi import WebSocket
 import structlog
@@ -18,7 +18,7 @@ class ConnectionManager:
         # In a real app, tickets should expire
         return ticket
 
-    async def connect(self, ticket: str, websocket: WebSocket) -> str:
+    async def connect(self, ticket: str, websocket: WebSocket) -> Optional[str]:
         user_id = self.tickets.get(ticket)
         if not user_id:
             await websocket.close(code=4003)

@@ -3,7 +3,7 @@ import threading
 import wx
 import wx.adv
 import structlog
-from ..network.api_client import APIClient
+from ..services.auth import AuthService
 
 logger = structlog.get_logger()
 
@@ -24,7 +24,7 @@ def _bold(ctrl):
 
 
 class LoginFrame(wx.Frame):
-    def __init__(self, api_client: APIClient, on_login_success):
+    def __init__(self, auth_service: AuthService, on_login_success):
         super().__init__(
             None,
             title="Skype™ Reborn",
@@ -32,7 +32,7 @@ class LoginFrame(wx.Frame):
             style=wx.DEFAULT_FRAME_STYLE & ~(wx.RESIZE_BORDER | wx.MAXIMIZE_BOX),
             name="Login Window",
         )
-        self.api_client = api_client
+        self.auth_service = auth_service
         self._on_login_success = on_login_success
         self.SetBackgroundColour(_BG)
         self._build_ui()
@@ -214,7 +214,7 @@ class LoginFrame(wx.Frame):
         ).start()
 
     def _do_login(self, username: str, password: str):
-        success, res = self.api_client.login(username, password)
+        success, res = self.auth_service.login(username, password)
         wx.CallAfter(self._on_login_done, success, res)
 
     def _on_login_done(self, success: bool, res):
@@ -243,7 +243,7 @@ class LoginFrame(wx.Frame):
         threading.Thread(target=self._do_register, args=(data,), daemon=True).start()
 
     def _do_register(self, data: dict):
-        success, msg = self.api_client.register(data)
+        success, msg = self.auth_service.register(data)
         wx.CallAfter(self._on_register_done, success, msg)
 
     def _on_register_done(self, success: bool, msg: str):

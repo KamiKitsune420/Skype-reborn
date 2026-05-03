@@ -1,9 +1,9 @@
 import os
 import threading
 import wx
-import wx.adv
 import structlog
 from ..services.auth import AuthService
+from ..audio.sounds import SoundPlayer
 
 logger = structlog.get_logger()
 
@@ -220,11 +220,7 @@ class LoginFrame(wx.Frame):
     def _on_login_done(self, success: bool, res):
         if success:
             self._set_status("Signed in!", error=False)
-            sound_path = os.path.join("assets", "sounds", "misk_signin.wav")
-            if os.path.exists(sound_path):
-                s = wx.adv.Sound(sound_path)
-                if s.IsOk():
-                    s.Play(wx.adv.SOUND_ASYNC)
+            SoundPlayer().play(os.path.join("assets", "sounds", "misk_signin.wav"))
             self._on_login_success(res)
         else:
             self._set_status(f"Sign in failed: {res}", error=True)

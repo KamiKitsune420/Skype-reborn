@@ -111,6 +111,10 @@ class CallSignalPayload(BaseModel):
     sender_id: str
     data: Optional[Dict[str, Any]] = None
 
+class ChatAckPayload(BaseModel):
+    peer_id: str    # whose messages were read
+    reader_id: str  # who read them
+
 class ErrorPayload(BaseModel):
     code: int
     message: str

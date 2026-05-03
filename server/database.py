@@ -42,6 +42,7 @@ class Message(Base):
     message_type: Mapped[str] = mapped_column(String, default="text")
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     delivered_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    read_at:      Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 class Conversation(Base):
     __tablename__ = "conversations"
@@ -101,6 +102,7 @@ async def init_db():
             ("recipient_id",  "TEXT"),
             ("message_type",  "TEXT DEFAULT 'text'"),
             ("delivered_at",  "DATETIME"),
+            ("read_at",       "DATETIME"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE messages ADD COLUMN {col} {sql_type}"))

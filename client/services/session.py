@@ -14,6 +14,7 @@ from shared.models import (
     ChatTypingPayload,
     PresenceUpdatePayload,
     CallSignalPayload,
+    ChatAckPayload,
     UserStatus,
 )
 
@@ -70,6 +71,11 @@ class CallHungUp:
 
 
 @dataclass(frozen=True)
+class MessageRead:
+    reader_id: str   # the person who read
+    peer_id: str     # whose messages they read (= our user_id when we receive this)
+
+@dataclass(frozen=True)
 class SessionDisconnected:
     pass
 
@@ -117,6 +123,11 @@ class ClientSessionService:
             is_typing=is_typing,
         )
         self._send(MessageType.CHAT_TYPING, payload)
+
+    def send_read_receipt(self, peer_id: str):
+        """Tell the server (and the peer) that we have read their messages."""
+        payload = ChatAckPayload(peer_id=peer_id, reader_id=self.user_id)
+        self._send(MessageType.CHAT_ACK, payload)
 
     def send_presence(self, status: UserStatus):
         payload = PresenceUpdatePayload(user_id=self.user_id, status=status)
@@ -176,6 +187,9 @@ class ClientSessionService:
                 self._emit(CallRejected(CallSignalPayload(**envelope.payload)))
             elif envelope.type == MessageType.CALL_HANGUP:
                 self._emit(CallHungUp(CallSignalPayload(**envelope.payload)))
+            elif envelope.type == MessageType.CHAT_ACK:
+                ack = ChatAckPayload(**envelope.payload)
+                self._emit(MessageRead(reader_id=ack.reader_id, peer_id=ack.peer_id))
         except Exception as exc:
             logger.error(
                 "Client session failed to process envelope",

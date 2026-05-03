@@ -27,10 +27,10 @@ from .voice_relay import start_voice_relay
 from .manager import manager
 from .config import settings
 from shared.models import (
-    Envelope, MessageType, LoginPayload, AuthSuccessPayload, 
+    Envelope, MessageType, LoginPayload, AuthSuccessPayload,
     ChatMessagePayload, ContactAddPayload, CallSignalPayload,
     PresenceUpdatePayload, UserStatus, ProfileUpdatePayload, ChatTypingPayload,
-    RegisterPayload, ErrorPayload
+    RegisterPayload, ErrorPayload, ChatAckPayload,
 )
 import structlog
 
@@ -472,8 +472,17 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
     user_id = await manager.connect(ticket, websocket)
     if not user_id:
         return
+
+    # Persist ONLINE status so contact list queries reflect the real state
+    async with SessionLocal() as db:
+        res = await db.execute(select(User).where(User.id == user_id))
+        user = res.scalars().first()
+        if user:
+            user.status = UserStatus.ONLINE.value
+            await db.commit()
+
     await _deliver_offline_messages(user_id)
-    
+
     # Send initial statuses of contacts
     async with SessionLocal() as db:
         stmt = select(User).join(Contact, Contact.contact_user_id == User.id).where(Contact.user_id == user_id)
@@ -551,6 +560,27 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
                     resp = Envelope(type=MessageType.CHAT_TYPING, payload=normalized.model_dump())
                     await manager.send_personal_message(resp.model_dump_json(), target.id)
 
+                elif envelope.type == MessageType.CHAT_ACK:
+                    ack = ChatAckPayload(**envelope.payload)
+                    # Mark all unread messages from peer → this user as read
+                    async with SessionLocal() as db:
+                        res = await db.execute(
+                            select(DBMessage).where(
+                                DBMessage.sender_id == ack.peer_id,
+                                DBMessage.recipient_id == user_id,
+                                DBMessage.read_at == None,  # noqa: E711
+                            )
+                        )
+                        for msg in res.scalars().all():
+                            msg.read_at = datetime.utcnow()
+                        await db.commit()
+                    # Forward receipt to the peer so their UI shows "Read"
+                    fwd = Envelope(
+                        type=MessageType.CHAT_ACK,
+                        payload=ChatAckPayload(peer_id=ack.peer_id, reader_id=user_id).model_dump(),
+                    )
+                    await manager.send_personal_message(fwd.model_dump_json(), ack.peer_id)
+
                 elif envelope.type in [MessageType.CALL_INITIATE, MessageType.CALL_ACCEPT, 
                                      MessageType.CALL_REJECT, MessageType.CALL_HANGUP,
                                      MessageType.CALL_RINGING, MessageType.CALL_CANDIDATE,
@@ -582,3 +612,9 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
                 
     except WebSocketDisconnect:
         await manager.disconnect(user_id)
+        async with SessionLocal() as db:
+            res = await db.execute(select(User).where(User.id == user_id))
+            user = res.scalars().first()
+            if user:
+                user.status = UserStatus.OFFLINE.value
+                await db.commit()

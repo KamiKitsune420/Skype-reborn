@@ -39,6 +39,7 @@ from ..services.session import (
     CallRejected,
     CallHungUp,
     SessionDisconnected,
+    MessageRead,
 )
 from .settings            import SettingsDialog
 from .find_people         import FindPeopleDialog
@@ -124,6 +125,8 @@ class MainWindow(wx.Frame):
         self.Centre()
         self.SetupShortcuts()
         self._pool.submit(self._bg_load_contacts)
+        # Announce ONLINE so contacts see us as online immediately
+        wx.CallAfter(self.session_service.send_presence, UserStatus.ONLINE)
 
     def _bind_session_events(self):
         self.session_service.on(ChatReceived, self._on_chat_received)
@@ -136,6 +139,7 @@ class MainWindow(wx.Frame):
         self.session_service.on(CallRejected, self._on_call_rejected)
         self.session_service.on(CallHungUp, self._on_call_hung_up)
         self.session_service.on(SessionDisconnected, self._on_session_disconnected)
+        self.session_service.on(MessageRead, self._on_message_read)
 
     # ── Shortcuts ─────────────────────────────────────────────────────
 
@@ -380,6 +384,7 @@ class MainWindow(wx.Frame):
         )
         if is_open_conversation:
             self.messages_controller.append_item(entry)
+            self.session_service.send_read_receipt(event.sender_id)
         should_notify = (
             not is_open_conversation
             or self.IsIconized()
@@ -482,6 +487,14 @@ class MainWindow(wx.Frame):
             return
         self.call_status_text.SetLabel("Call ended.")
         self.calls_controller.stop_call()
+
+    def _on_message_read(self, event: MessageRead):
+        if not self._alive: return
+        # event.reader_id read messages in the conversation with event.peer_id (us).
+        # Update the open conversation if it's with that reader.
+        if (self._current_view == self.VIEW_MESSAGES
+                and self.current_conversation_id == event.reader_id):
+            self.messages_controller.mark_conversation_read()
 
     def _on_session_disconnected(self, event: SessionDisconnected):
         if not self._alive: return

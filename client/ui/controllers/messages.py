@@ -46,6 +46,8 @@ class MessagesController:
         owner._show_view(owner.VIEW_MESSAGES)
         owner._load_seq += 1
         owner._pool.submit(self._bg_load_messages, contact["id"], owner._load_seq)
+        # Tell the peer we've read their messages
+        owner.session_service.send_read_receipt(contact["id"])
 
     def _bg_load_messages(self, conv_id: str, seq: int):
         messages = self.owner.data_service.get_messages(conv_id)
@@ -91,14 +93,27 @@ class MessagesController:
         for entry in pending:
             self.append_item(entry)
 
+    def _item_text(self, entry: dict) -> str:
+        sender = entry["sender"]
+        verb   = "sent" if entry["is_mine"] else "received"
+        ts     = _ts_full(entry["dt"])
+        read   = "  ✓ Read" if entry.get("read") else ""
+        return f"{sender}: {entry['content']}  {verb} on {ts}{read}"
+
     def append_item(self, entry: dict):
         owner = self.owner
-        sender = entry["sender"]
-        verb = "sent" if entry["is_mine"] else "received"
-        ts_str = _ts_full(entry["dt"])
+        entry.setdefault("read", False)
         owner._message_items.append(entry)
-        owner.message_list.Append(f"{sender}: {entry['content']}  {verb} on {ts_str}")
+        owner.message_list.Append(self._item_text(entry))
         owner.message_list.SetSelection(owner.message_list.GetCount() - 1)
+
+    def mark_conversation_read(self):
+        """Mark all sent messages in the current conversation as read and refresh their display."""
+        owner = self.owner
+        for idx, item in enumerate(owner._message_items):
+            if item.get("is_mine") and not item.get("read"):
+                item["read"] = True
+                owner.message_list.SetString(idx, self._item_text(item))
 
     def append_call_record(
         self,
@@ -250,6 +265,7 @@ class MessagesController:
             "dt": datetime.datetime.now(),
             "is_mine": True,
             "msg_id": "",
+            "read": False,
         }
         self.append_item(entry)
         if owner.settings.notification_sounds:

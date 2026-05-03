@@ -306,7 +306,7 @@ class EchoServiceBot:
 
 
 async def main():
-    server_url = os.environ.get("SKYPE_SERVER_URL", "http://127.0.0.1:8000")
+    server_url = os.environ.get("SKYPE_SERVER_URL", "http://127.0.0.1:9433")
     bot_sdk = BotSDK(server_url, messageable=False)
 
     await asyncio.sleep(2)

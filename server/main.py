@@ -182,6 +182,12 @@ async def start_bots():
     env = os.environ.copy()
     env["PYTHONPATH"] = project_root + os.pathsep + env.get("PYTHONPATH", "")
 
+    # Bots always run on the same machine as the server, so they should
+    # always connect to 127.0.0.1.  If SKYPE_SERVER_URL isn't set in the
+    # environment, default to port 9433 (the standard server port) so bots
+    # don't accidentally try the old dev default of port 8000.
+    env.setdefault("SKYPE_SERVER_URL", "http://127.0.0.1:9433")
+
     bots = [f for f in os.listdir(bot_dir) if f.endswith("_bot.py")]
     processes = []
     for bot in bots:

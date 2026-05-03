@@ -110,7 +110,23 @@ class LoginFrame(wx.Frame):
         f.SetWeight(wx.FONTWEIGHT_BOLD)
         hdr.SetFont(f)
         hdr.SetForegroundColour(_TEXT)
-        sz.Add(hdr, 0, wx.BOTTOM, 18)
+        sz.Add(hdr, 0, wx.BOTTOM, 6)
+
+        # Show which server the client is pointed at so it's obvious
+        # whether you're on localhost or the remote server.
+        import os as _os
+        _server = _os.environ.get("SKYPE_SERVER_URL", "http://random-gaming.com:9433")
+        _is_local = "127.0.0.1" in _server or "localhost" in _server
+        server_lbl = wx.StaticText(
+            page,
+            label=f"{'🖥 LOCAL — ' if _is_local else '🌐 '}{_server}",
+            name="Server Label",
+        )
+        sf = server_lbl.GetFont()
+        sf.SetPointSize(8)
+        server_lbl.SetFont(sf)
+        server_lbl.SetForegroundColour(wx.Colour(16, 124, 16) if _is_local else _GRAY)
+        sz.Add(server_lbl, 0, wx.BOTTOM, 14)
 
         user_lbl, self.user_ctrl = self._field(page, "Skype Name", "Username")
         sz.Add(user_lbl, 0, wx.BOTTOM, 4)

@@ -15,9 +15,7 @@ _SERVER_URL = os.environ.get("SKYPE_SERVER_URL", "http://random-gaming.com:9433"
 if sys.platform == "win32":
     try:
         import ctypes
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
-            "SkypeReborn.App.1"
-        )
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SkypeReborn")
     except Exception:
         pass
 
@@ -26,7 +24,6 @@ class SkypeRebornApp:
     def __init__(self):
         self.app = wx.App()
         self.app.SetAppName("Skype Reborn")
-        self.app.SetAppDisplayName("Skype Reborn")
         self.api_client = APIClient(_SERVER_URL)
         self.auth_service = AuthService(self.api_client)
         self.ws_client = WSClient(_SERVER_URL, self.api_client)

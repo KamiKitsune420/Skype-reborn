@@ -12,8 +12,15 @@ logger = structlog.get_logger()
 
 
 class BotSDK:
-    def __init__(self, server_url: str):
+    def __init__(self, server_url: str, messageable: bool = True):
+        """
+        messageable: if False, users cannot send messages to this bot,
+                     but the bot can still send messages to users.
+                     Enforced client-side via the is_bot flag the server
+                     already returns for *_service accounts.
+        """
         self.server_url = server_url
+        self.messageable = messageable
         self.ws_url = server_url.replace("http", "ws")
         self.token = None
         self.user_id = None
@@ -119,7 +126,7 @@ class BotSDK:
                 data, _ = self.udp_socket.recvfrom(2048)
                 if len(data) < 25:
                     continue
-                session_id = UUID(bytes=data[:16]).hex
+                session_id = str(UUID(bytes=data[:16]))
                 audio_data = data[25:]
                 for handler in self.udp_handlers:
                     handler(session_id, audio_data)

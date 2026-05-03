@@ -2,6 +2,18 @@ import os
 
 import wx
 
+
+class _NamedAccessible(wx.Accessible):
+    """Gives an explicit accessible name to any control that lacks one."""
+    def __init__(self, ctrl, label):
+        super().__init__(ctrl)
+        self._label = label
+
+    def GetName(self, childId):
+        if childId == 0:
+            return wx.ACC_OK, self._label
+        return wx.ACC_NOT_IMPLEMENTED, ""
+
 _SB_BG = wx.Colour(30, 58, 91)
 _SB_HDR = wx.Colour(20, 45, 72)
 _SB_TEXT = wx.WHITE
@@ -16,39 +28,6 @@ def build_contact_view(owner, book: wx.Simplebook) -> wx.Panel:
     page.SetBackgroundColour(_SB_BG)
     sz = wx.BoxSizer(wx.VERTICAL)
 
-    prof = wx.Panel(page, name="Profile Strip")
-    prof.SetBackgroundColour(_SB_HDR)
-    prof_sz = wx.BoxSizer(wx.HORIZONTAL)
-
-    av_path = os.path.join("assets", "images", "profile_anonymous.png")
-    if os.path.exists(av_path):
-        img = wx.Image(av_path).Scale(40, 40, wx.IMAGE_QUALITY_HIGH)
-        owner.my_avatar = wx.StaticBitmap(prof, bitmap=wx.Bitmap(img), name="My Avatar")
-        prof_sz.Add(owner.my_avatar, 0, wx.ALL, 10)
-
-    info = wx.BoxSizer(wx.VERTICAL)
-    owner.profile_name = wx.StaticText(
-        prof, label=owner.user_data.get("username", ""), name="Username"
-    )
-    f = owner.profile_name.GetFont()
-    f.SetPointSize(10)
-    f.SetWeight(wx.FONTWEIGHT_BOLD)
-    owner.profile_name.SetFont(f)
-    owner.profile_name.SetForegroundColour(_SB_TEXT)
-    info.Add(owner.profile_name, 0)
-
-    owner.my_status_label = wx.StaticText(prof, label="Online", name="My Status")
-    sf = owner.my_status_label.GetFont()
-    sf.SetPointSize(8)
-    owner.my_status_label.SetFont(sf)
-    owner.my_status_label.SetForegroundColour(_SB_SUB)
-    info.Add(owner.my_status_label, 0)
-
-    prof_sz.Add(info, 1, wx.ALIGN_CENTER_VERTICAL | wx.RIGHT, 10)
-    prof.SetSizer(prof_sz)
-    prof.SetMinSize((-1, 60))
-    sz.Add(prof, 0, wx.EXPAND)
-
     btn_row = wx.BoxSizer(wx.HORIZONTAL)
     owner.profile_btn = wx.Button(page, label="View Profile", name="View Profile")
     owner.find_btn = wx.Button(page, label="Find People", name="Find People")
@@ -56,10 +35,16 @@ def build_contact_view(owner, book: wx.Simplebook) -> wx.Panel:
     btn_row.Add(owner.find_btn, 1, wx.EXPAND | wx.ALL, 6)
     sz.Add(btn_row, 0, wx.EXPAND)
 
-    owner.search_ctrl = wx.SearchCtrl(page, name="Search")
-    owner.search_ctrl.SetHint("Search people...")
-    owner.search_ctrl.ShowSearchButton(True)
-    owner.search_ctrl.ShowCancelButton(True)
+    search_lbl = wx.StaticText(page, label="Search contacts:", name="Search Label")
+    search_lbl.SetForegroundColour(_SB_SUB)
+    sz.Add(search_lbl, 0, wx.LEFT | wx.TOP, 6)
+    owner.search_ctrl = wx.TextCtrl(
+        page,
+        style=wx.TE_PROCESS_ENTER,
+        name="Search contacts",
+    )
+    owner.search_ctrl.SetHint("Search people...  Enter to search, Esc to clear")
+    owner.search_ctrl.SetAccessible(_NamedAccessible(owner.search_ctrl, "Search contacts"))
     sz.Add(owner.search_ctrl, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.BOTTOM, 6)
 
     tab_row = wx.BoxSizer(wx.HORIZONTAL)
@@ -92,10 +77,16 @@ def build_contact_view(owner, book: wx.Simplebook) -> wx.Panel:
     owner.find_btn.Bind(wx.EVT_BUTTON, owner.OnFindPeople)
     owner.recents_btn.Bind(wx.EVT_BUTTON, lambda e: owner._switch_contact_mode("recents"))
     owner.contacts_btn.Bind(wx.EVT_BUTTON, lambda e: owner._switch_contact_mode("contacts"))
-    owner.search_ctrl.Bind(wx.EVT_SEARCHCTRL_SEARCH_BTN, owner.contacts_controller.search)
-    owner.search_ctrl.Bind(wx.EVT_SEARCHCTRL_CANCEL_BTN, owner.contacts_controller.on_search_cancel)
     owner.search_ctrl.Bind(wx.EVT_TEXT_ENTER, owner.contacts_controller.search)
     owner.search_ctrl.Bind(wx.EVT_TEXT, owner.contacts_controller.on_search_text)
+    owner.search_ctrl.Bind(
+        wx.EVT_KEY_DOWN,
+        lambda e: (
+            owner.contacts_controller.on_search_cancel(e)
+            if e.GetKeyCode() == wx.WXK_ESCAPE
+            else e.Skip()
+        ),
+    )
     owner.contact_list.Bind(wx.EVT_LISTBOX, owner.contacts_controller.on_selected)
     owner.contact_list.Bind(wx.EVT_LISTBOX_DCLICK, owner.contacts_controller.on_open_requested)
     owner.contact_list.Bind(wx.EVT_KEY_DOWN, owner.contacts_controller.on_key)
@@ -128,13 +119,16 @@ def build_message_view(owner, book: wx.Simplebook) -> wx.Panel:
     )
     sz.Add(owner.message_list, 1, wx.EXPAND | wx.ALL, 4)
 
+    msg_lbl = wx.StaticText(page, label="Message:", name="Message Label")
+    sz.Add(msg_lbl, 0, wx.LEFT | wx.TOP, 4)
     owner.message_input = wx.TextCtrl(
         page,
         style=wx.TE_MULTILINE | wx.TE_PROCESS_ENTER,
-        name="Message Input",
+        name="Message",
     )
     owner.message_input.SetHint("Type a message...  Enter = send, Shift+Enter = newline")
     owner.message_input.SetMinSize((-1, 40))
+    owner.message_input.SetAccessible(_NamedAccessible(owner.message_input, "Message"))
     sz.Add(owner.message_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
 
     btn_row = wx.BoxSizer(wx.HORIZONTAL)

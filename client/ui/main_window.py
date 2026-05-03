@@ -7,8 +7,8 @@ Three full-window views switched via wx.Simplebook:
 
 Keyboard contract
 ─────────────────
-Alt+1          → Recents view
-Alt+2          → Contacts view
+Alt+1          → Contacts view
+Alt+2          → Recents view
 Enter on item  → Audio call
 Shift+F10/App  → Context menu
 Esc (messages) → Back to contacts
@@ -41,13 +41,14 @@ from ..services.session import (
     CallHungUp,
     SessionDisconnected,
 )
-from .settings       import SettingsDialog
-from .find_people    import FindPeopleDialog
-from .profile_dialog import ProfileDialog
+from .settings            import SettingsDialog
+from .find_people         import FindPeopleDialog
+from .profile_dialog      import ProfileDialog
+from .incoming_call_dialog import IncomingCallDialog
 from .views import build_contact_view, build_message_view, build_call_view
 from .controllers.contacts import ContactsController
 from .controllers.messages import MessagesController
-from .controllers.calls import CallsController
+from .controllers.calls    import CallsController
 
 logger = structlog.get_logger()
 
@@ -91,6 +92,12 @@ class MainWindow(wx.Frame):
         self.is_calling   = False
         self.looping_sound = None
         self._call_minimized = False
+        self._call_start_time: datetime.datetime | None = None
+        self._call_peer_id: str | None = None
+        self._call_peer_name: str = "Contact"
+        self._call_is_incoming: bool = False
+        self._mute_on_answer: bool = False
+        self._pending_call_records: dict = {}
 
         self._pool        = ThreadPoolExecutor(max_workers=4, thread_name_prefix="api")
         self._load_seq    = 0
@@ -152,8 +159,8 @@ class MainWindow(wx.Frame):
         accel = [
             (wx.ACCEL_ALT,  wx.WXK_PAGEUP,   ID_ANSWER),
             (wx.ACCEL_ALT,  wx.WXK_PAGEDOWN, ID_HANGUP),
-            (wx.ACCEL_ALT,  ord('1'),         ID_RECENTS),
-            (wx.ACCEL_ALT,  ord('2'),         ID_CONTACTS),
+            (wx.ACCEL_ALT,  ord('1'),         ID_CONTACTS),
+            (wx.ACCEL_ALT,  ord('2'),         ID_RECENTS),
             (wx.ACCEL_NORMAL, wx.WXK_ESCAPE,  ID_BACK),
             (wx.ACCEL_CTRL, ord(','),         wx.ID_PREFERENCES),
         ]
@@ -204,8 +211,8 @@ class MainWindow(wx.Frame):
         skype.Append(wx.ID_EXIT, "Sign &Out")
 
         view = wx.Menu()
-        rec_item  = view.Append(wx.ID_ANY, "&Recent Conversations\tAlt+1")
-        cont_item = view.Append(wx.ID_ANY, "&Contacts\tAlt+2")
+        cont_item = view.Append(wx.ID_ANY, "&Contacts\tAlt+1")
+        rec_item  = view.Append(wx.ID_ANY, "&Recent Conversations\tAlt+2")
 
         help_ = wx.Menu()
         help_.Append(wx.ID_HELP,  "&Help Topics")
@@ -241,8 +248,10 @@ class MainWindow(wx.Frame):
         # Timers
         self._call_timer     = wx.Timer(self)
         self._presence_timer = wx.Timer(self)
-        self.Bind(wx.EVT_TIMER, self.calls_controller.on_timeout, self._call_timer)
-        self.Bind(wx.EVT_TIMER, lambda e: self.contacts_controller.update_list(), self._presence_timer)
+        self._ring_timer     = wx.Timer(self)
+        self.Bind(wx.EVT_TIMER, self.calls_controller.on_timeout,                  self._call_timer)
+        self.Bind(wx.EVT_TIMER, lambda e: self.contacts_controller.update_list(),  self._presence_timer)
+        self.Bind(wx.EVT_TIMER, self._on_ring_timer,                               self._ring_timer)
         self.Bind(wx.EVT_CLOSE, self.OnClose)
         self.Bind(wx.EVT_MENU,  self.OnSettings, id=wx.ID_PREFERENCES)
 
@@ -310,8 +319,6 @@ class MainWindow(wx.Frame):
 
     def _send_presence(self, status_str: str):
         self.session_service.send_presence(UserStatus[status_str])
-        labels = {"ONLINE": "Online", "AWAY": "Away", "BUSY": "Busy", "INVISIBLE": "Invisible"}
-        self.my_status_label.SetLabel(labels.get(status_str, status_str.title()))
 
     def OnViewProfile(self, event):
         dlg = ProfileDialog(self, self.data_service, self.user_data)
@@ -352,6 +359,10 @@ class MainWindow(wx.Frame):
     def stop_looping_sound(self):
         wx.adv.Sound.Stop()
         self.looping_sound = None
+        self._ring_timer.Stop()
+
+    def _on_ring_timer(self, event):
+        self.play_sound("call_connecting.wav")
 
     # ═══════════════════════════════════════════════════════════════════
     # SESSION EVENTS
@@ -413,10 +424,19 @@ class MainWindow(wx.Frame):
 
     def _on_presence_changed(self, event: PresenceChanged):
         if not self._alive: return
+        new_status = event.status.value
         for c in self.contacts:
             if c["id"] == event.user_id:
-                c["status"] = event.status.value
-                self.TriggerUpdate(); return
+                old_status = c.get("status", "OFFLINE")
+                c["status"] = new_status
+                if old_status != new_status:
+                    name = c.get("display_name", "Contact")
+                    if new_status == "ONLINE" and old_status in ("OFFLINE", "INVISIBLE"):
+                        self.notifications.notify_presence_change(name, True)
+                    elif new_status in ("OFFLINE", "INVISIBLE") and old_status == "ONLINE":
+                        self.notifications.notify_presence_change(name, False)
+                self.TriggerUpdate()
+                return
         self._pool.submit(self._bg_load_contacts)
 
     def _on_incoming_call(self, event: IncomingCall):
@@ -427,31 +447,32 @@ class MainWindow(wx.Frame):
         self.play_sound(snd, loop=True)
         sender_name = self._contact_name(pl.sender_id, "Someone")
         self.notifications.notify_incoming_call(sender_name)
-        res = wx.MessageBox(
-            f"{sender_name} is calling you. Answer?",
-            "Incoming Call", wx.YES_NO, self,
-        )
-        if res == wx.YES:
+        dlg = IncomingCallDialog(self, sender_name)
+        res = dlg.ShowModal()
+        self._mute_on_answer = dlg.mute_on_answer
+        dlg.Destroy()
+        if res == wx.ID_YES:
             self.calls_controller.answer_call(pl)
-        else:
+        elif res == wx.ID_NO:
             self.call_service.reject(pl)
             self.stop_looping_sound()
+        # wx.ID_CLOSE = minimize: keep ringing, user can answer via Alt+PageUp
 
     def _on_call_connecting(self, event: CallConnecting):
         if not self._alive: return
         if not self.call_service.is_active_session(event.payload):
             return
-        self.stop_looping_sound()
         self.call_status_text.SetLabel("Ringing…")
-        self.play_sound("call_connecting.wav", loop=True)
 
     def _on_call_accepted(self, event: CallAccepted):
         if not self._alive: return
         if not self.call_service.is_active_session(event.payload):
             return
         self._call_timer.Stop()
+        self._ring_timer.Stop()
         self.stop_looping_sound()
         self.call_status_text.SetLabel("In call")
+        self._call_start_time = datetime.datetime.now()
         self.call_service.remote_accepted()
 
     def _on_call_rejected(self, event: CallRejected):

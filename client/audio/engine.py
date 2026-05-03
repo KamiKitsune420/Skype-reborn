@@ -1,6 +1,5 @@
 import os
 import sys
-import heapq
 import threading
 import numpy as np
 import sounddevice as sd
@@ -50,19 +49,24 @@ except Exception:
 
 
 class AudioEngine:
+    _BUF_STARTUP = 3   # frames to accumulate before starting playback
+    _BUF_MAX     = 50  # frames to keep; oldest are dropped on overflow
+    _BUF_RESYNC  = 20  # frames-ahead gap before jumping forward to recover
+
     def __init__(self, sample_rate=16000, channels=1, block_size=320):
         self.sample_rate = sample_rate
         self.channels = channels
         self.block_size = block_size  # 20ms at 16kHz
 
-        self.input_stream = None
-        self.output_stream = None
+        self._stream = None
         self.send_callback = None
 
-        # Jitter Buffer: (sequence_number, data)
-        self.jitter_buffer = []
-        self.buffer_lock = threading.Lock()
-        self.next_expected_seq = None
+        # Jitter buffer: dict {seq -> opus_bytes} for O(1) lookup.
+        # Research (Speex/PJSIP) confirms: drop oldest on overflow, resync
+        # only after a large gap (≥20 frames), never block in the callback.
+        self._play_buf: dict = {}
+        self._buf_lock = threading.Lock()
+        self._next_seq: int | None = None
 
         self.is_running = False
         self._muted     = False
@@ -76,35 +80,27 @@ class AudioEngine:
             self.encoder = None
             self.decoder = None
 
-        # VAD — optional, degrades gracefully when webrtcvad is absent
+        # VAD is disabled intentionally: aggressiveness-2 suppresses all frames
+        # during silence, which breaks calls when neither party is actively speaking
+        # (including same-machine testing).  All captured frames are sent.
         self.vad = None
-        if VAD_AVAILABLE:
-            try:
-                self.vad = _webrtcvad.Vad(2)  # Moderate aggressiveness
-            except Exception as e:
-                logger.error("Failed to initialize VAD", error=str(e))
 
     def start(self, send_callback) -> bool:
         self.send_callback = send_callback
         try:
-            self.input_stream = sd.InputStream(
+            # Full-duplex stream: one device open for both capture and playback,
+            # synchronized clock.  Two separate InputStream+OutputStream pairs can
+            # conflict when two client instances share the same device.
+            self._stream = sd.Stream(
                 samplerate=self.sample_rate,
                 channels=self.channels,
-                callback=self._input_callback,
+                callback=self._duplex_callback,
                 blocksize=self.block_size,
                 dtype="int16",
             )
-            self.output_stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
-                callback=self._output_callback,
-                blocksize=self.block_size,
-                dtype="int16",
-            )
-            self.input_stream.start()
-            self.output_stream.start()
+            self._stream.start()
             self.is_running = True
-            logger.info("Audio Engine started (Opus/VAD enabled)")
+            logger.info("Audio Engine started")
             return True
         except Exception as e:
             logger.error("Failed to start audio engine", error=str(e))
@@ -113,103 +109,70 @@ class AudioEngine:
 
     def stop(self):
         self.is_running = False
-        if self.input_stream:
+        if self._stream:
             try:
-                self.input_stream.stop()
-                self.input_stream.close()
+                self._stream.stop()
+                self._stream.close()
             except Exception:
                 pass
-            self.input_stream = None
-
-        if self.output_stream:
-            try:
-                self.output_stream.stop()
-                self.output_stream.close()
-            except Exception:
-                pass
-            self.output_stream = None
-
-        with self.buffer_lock:
-            self.jitter_buffer.clear()
-            self.next_expected_seq = None
+            self._stream = None
+        with self._buf_lock:
+            self._play_buf.clear()
+            self._next_seq = None
         logger.info("Audio Engine stopped")
 
-    def _input_callback(self, indata, frames, time, status):
-        if status:
-            logger.warning("Audio input status", status=status)
-        if not (self.send_callback and self.is_running and self.encoder):
-            return
+    def _duplex_callback(self, indata, outdata, frames, time, status):
+        # Single full-duplex callback — handles both playback and capture.
+        # Must NEVER raise: any uncaught exception causes sounddevice to return
+        # paAbort and permanently kill the stream.
 
-        raw_pcm = indata.tobytes()
+        # ── Playback (outdata must always be filled) ──────────────────────
+        try:
+            if status:
+                logger.warning("Audio status", status=status)
 
-        if self._muted:
-            return
+            opus_data = None
+            with self._buf_lock:
+                if self._next_seq is not None:
+                    if self._play_buf:
+                        oldest = min(self._play_buf)
+                        if oldest > self._next_seq + self._BUF_RESYNC:
+                            self._next_seq = oldest
+                    opus_data = self._play_buf.pop(self._next_seq, None)
+                    self._next_seq += 1
 
-        # VAD: skip silent frames to save bandwidth; pass everything when VAD is absent
-        if self.vad is not None:
             try:
-                is_speech = self.vad.is_speech(raw_pcm, self.sample_rate)
+                raw = self.decoder.decode(opus_data, self.block_size) if self.decoder else None
             except Exception:
-                is_speech = True
-        else:
-            is_speech = True
+                raw = None
 
-        if is_speech:
-            # 2. Encode with Opus
-            try:
-                encoded = self.encoder.encode(raw_pcm, self.block_size)
-                self.send_callback(encoded)
-            except Exception as e:
-                logger.error("Opus encoding failed", error=str(e))
-
-    def _output_callback(self, outdata, frames, time, status):
-        if status:
-            logger.warning("Audio output status", status=status)
-
-        pcm_payload = None
-        
-        with self.buffer_lock:
-            # Buffer must have at least a few packets to start playing (initial jitter delay)
-            if self.next_expected_seq is None:
-                if len(self.jitter_buffer) >= 3:
-                    self.next_expected_seq = self.jitter_buffer[0][0]
-                else:
-                    outdata.fill(0)
-                    return
-
-            # Check if the next expected packet is in the buffer
-            if self.jitter_buffer and self.jitter_buffer[0][0] <= self.next_expected_seq:
-                seq, encoded_data = heapq.heappop(self.jitter_buffer)
-                
-                # If we got an old packet (late), discard and try again
-                while seq < self.next_expected_seq and self.jitter_buffer:
-                    seq, encoded_data = heapq.heappop(self.jitter_buffer)
-                
-                if seq == self.next_expected_seq:
-                    try:
-                        pcm_payload = self.decoder.decode(encoded_data, self.block_size)
-                    except Exception as e:
-                        logger.error("Opus decoding failed", error=str(e))
-                
-            self.next_expected_seq += 1
-
-        if pcm_payload:
-            arr = np.frombuffer(pcm_payload, dtype="int16").reshape(-1, self.channels)
-            n = min(len(arr), frames)
-            outdata[:n] = arr[:n]
-            if n < frames:
-                outdata[n:].fill(0)
-        else:
-            # Packet Loss Concealment (PLC): Opus can decode 'None' to fill the gap
-            try:
-                if self.decoder:
-                    plc_pcm = self.decoder.decode(None, self.block_size)
-                    arr = np.frombuffer(plc_pcm, dtype="int16").reshape(-1, self.channels)
-                    outdata[:] = arr[:frames]
-                else:
-                    outdata.fill(0)
-            except Exception:
+            if raw:
+                arr = np.frombuffer(raw, dtype="int16").reshape(-1, self.channels)
+                n = min(len(arr), frames)
+                outdata[:n] = arr[:n]
+                if n < frames:
+                    outdata[n:].fill(0)
+            else:
                 outdata.fill(0)
+
+        except Exception as e:
+            logger.error("Playback side crashed", error=str(e))
+            try:
+                outdata.fill(0)
+            except Exception:
+                pass
+
+        # ── Capture (mic → encode → send) ────────────────────────────────
+        try:
+            if self.send_callback and self.is_running and self.encoder and not self._muted:
+                try:
+                    self.send_callback(
+                        self.encoder.encode(indata.tobytes(), self.block_size)
+                    )
+                except Exception as e:
+                    logger.error("Encode/send failed", error=str(e))
+        except Exception as e:
+            logger.error("Capture side crashed", error=str(e))
 
     def mute(self):
         self._muted = True
@@ -218,10 +181,15 @@ class AudioEngine:
         self._muted = False
 
     def receive_audio(self, seq: int, data: bytes):
-        """Called from network layer with sequence number and encoded data."""
-        with self.buffer_lock:
-            # Use heapq for priority-based reordering
-            heapq.heappush(self.jitter_buffer, (seq, data))
-            # Prevent buffer from growing indefinitely
-            if len(self.jitter_buffer) > 50:
-                heapq.heappop(self.jitter_buffer)
+        """Called from the network layer with a sequence number and Opus payload."""
+        with self._buf_lock:
+            self._play_buf[seq] = data
+
+            # Drop oldest frame when the buffer is full so we always hold the
+            # most recent audio (confirmed correct by Speex/PJSIP reference).
+            while len(self._play_buf) > self._BUF_MAX:
+                del self._play_buf[min(self._play_buf)]
+
+            # Begin playback once the startup buffer is filled.
+            if self._next_seq is None and len(self._play_buf) >= self._BUF_STARTUP:
+                self._next_seq = min(self._play_buf)

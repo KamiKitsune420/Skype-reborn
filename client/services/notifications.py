@@ -32,6 +32,10 @@ class DesktopNotificationService:
         if self.parent.IsIconized() or not self.parent.IsActive():
             self._show_toast("Incoming call", caller_name)
 
+    def notify_presence_change(self, name: str, is_online: bool):
+        msg = f"{name} is now online" if is_online else f"{name} has gone offline"
+        self._show_toast("Skype", msg)
+
     def _show_toast(self, title: str, message: str):
         try:
             note = wx.adv.NotificationMessage(title=title, message=message, parent=self.parent)

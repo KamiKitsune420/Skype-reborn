@@ -58,6 +58,9 @@ class MessagesController:
         owner._message_items = []
         owner.message_list.Clear()
         if not messages:
+            pending = owner._pending_call_records.pop(owner.current_conversation_id, [])
+            for entry in pending:
+                self.append_item(entry)
             return
         my_id = owner.user_data["user_id"]
         cname = owner.selected_contact["display_name"] if owner.selected_contact else "Contact"
@@ -84,6 +87,9 @@ class MessagesController:
             owner.message_list.Append(
                 f"{sender}: {message['content']}  {verb} on {ts_str}"
             )
+        pending = owner._pending_call_records.pop(owner.current_conversation_id, [])
+        for entry in pending:
+            self.append_item(entry)
 
     def append_item(self, entry: dict):
         owner = self.owner
@@ -93,6 +99,35 @@ class MessagesController:
         owner._message_items.append(entry)
         owner.message_list.Append(f"{sender}: {entry['content']}  {verb} on {ts_str}")
         owner.message_list.SetSelection(owner.message_list.GetCount() - 1)
+
+    def append_call_record(
+        self,
+        peer_id: str,
+        peer_name: str,
+        is_incoming: bool,
+        duration: datetime.timedelta,
+    ):
+        owner = self.owner
+        total_secs = int(duration.total_seconds())
+        mins, secs = divmod(total_secs, 60)
+        dur_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        now = datetime.datetime.now()
+        sender = peer_name if is_incoming else "You"
+        entry = {
+            "sender": sender,
+            "content": f"\U0001f4de Audio call · {dur_str}",
+            "dt": now,
+            "is_mine": not is_incoming,
+            "msg_id": "",
+        }
+        is_open = (
+            owner.current_conversation_id == peer_id
+            and owner._current_view == owner.VIEW_MESSAGES
+        )
+        if is_open:
+            self.append_item(entry)
+        else:
+            owner._pending_call_records.setdefault(peer_id, []).append(entry)
 
     def on_msg_key(self, event):
         owner = self.owner

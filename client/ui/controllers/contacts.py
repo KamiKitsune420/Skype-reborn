@@ -29,8 +29,9 @@ class ContactsController:
             items = []
             for contact in owner.contacts:
                 mood = contact.get("mood_message", "")
+                tag  = "  [Bot]" if contact.get("is_bot") else ""
                 items.append(
-                    f"{contact['display_name']}, {contact['status'].title()}{', ' + mood if mood else ''}"
+                    f"{contact['display_name']}{tag}, {contact['status'].title()}{', ' + mood if mood else ''}"
                 )
             if not items:
                 items = ["No contacts yet. Use Find People to add contacts."]
@@ -90,6 +91,15 @@ class ContactsController:
 
         if owner.selected_contact:
             owner.SetStatusText(owner.selected_contact["display_name"])
+            if owner.selected_contact.get("is_bot"):
+                wx.MessageBox(
+                    f"{owner.selected_contact['display_name']} is a bot service.\n"
+                    "You cannot send messages to this contact.",
+                    "Messaging Unavailable",
+                    wx.OK | wx.ICON_INFORMATION,
+                    owner,
+                )
+                return False
             owner.messages_controller.open_conversation(owner.selected_contact)
             return True
         return False
@@ -114,7 +124,9 @@ class ContactsController:
         video_item = call_sub.Append(wx.ID_ANY, "Video Call")
         menu.AppendSubMenu(call_sub, "Call")
 
+        is_bot = bool(owner.selected_contact.get("is_bot"))
         im_item = menu.Append(wx.ID_ANY, "Send IM")
+        im_item.Enable(not is_bot)
         menu.Append(wx.ID_ANY, "Add to Group").Enable(False)
         menu.Append(wx.ID_ANY, "Report to Admins").Enable(False)
         block_item = menu.Append(wx.ID_ANY, "Block This Contact")

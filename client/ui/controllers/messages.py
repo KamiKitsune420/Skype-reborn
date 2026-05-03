@@ -268,8 +268,7 @@ class MessagesController:
             "read": False,
         }
         self.append_item(entry)
-        if owner.settings.notification_sounds:
-            owner.play_sound("im_sendmessage.wav")
+        owner.play_sound("im_sendmsg.wav")
 
     def send_file(self, event):
         owner = self.owner

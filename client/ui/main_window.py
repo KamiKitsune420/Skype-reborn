@@ -385,22 +385,15 @@ class MainWindow(wx.Frame):
         if is_open_conversation:
             self.messages_controller.append_item(entry)
             self.session_service.send_read_receipt(event.sender_id)
+        # Always play the receive sound regardless of notification settings
+        self.play_sound("im_getmessage.wav")
         should_notify = (
             not is_open_conversation
             or self.IsIconized()
             or not self.IsActive()
-            or self.settings.notification_sounds
         )
         if should_notify:
-            self.notifications.notify_chat_message(
-                sender_name,
-                event.content,
-                play_sound=(
-                    lambda: self.play_sound("im_sendmessage.wav")
-                    if self.settings.notification_sounds
-                    else None
-                ),
-            )
+            self.notifications.notify_chat_message(sender_name, event.content)
 
     def _on_typing_changed(self, event: TypingChanged):
         if not self._alive: return

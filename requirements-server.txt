@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+argon2-cffi
+pydantic-settings
+httpx
+structlog
+aiofiles
+sqlalchemy
+aiosqlite
+python-multipart
+numpy
+python-jose[cryptography]
+websockets
+opuslib
+cryptography

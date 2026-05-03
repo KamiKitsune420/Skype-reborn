@@ -1,47 +1,16 @@
 """Settings dialog — Audio, Appearance, Devices tabs."""
 import os
 import threading
-import wave
-import numpy as np
 import structlog
 import wx
 import sounddevice as sd
 from shared.models import SettingsPayload
+from ..audio.sounds import read_wav_float as _read_wav
 
 logger = structlog.get_logger()
 
 _BLUE = wx.Colour(0, 120, 212)
 _SOUNDS_DIR = os.path.join("assets", "sounds")
-
-
-def _read_wav(path: str):
-    """Read a WAV file of any standard bit depth and return (float32_array, sample_rate)."""
-    with wave.open(path, "rb") as wf:
-        n_frames  = wf.getnframes()
-        n_ch      = wf.getnchannels()
-        sw        = wf.getsampwidth()   # bytes per sample
-        fs        = wf.getframerate()
-        raw       = wf.readframes(n_frames)
-
-    if sw == 1:                         # 8-bit unsigned
-        s = np.frombuffer(raw, dtype=np.uint8).astype(np.float32) / 128.0 - 1.0
-    elif sw == 2:                       # 16-bit signed LE
-        s = np.frombuffer(raw, dtype="<i2").astype(np.float32) / 32768.0
-    elif sw == 3:                       # 24-bit signed LE — 3 bytes per sample
-        raw_u8 = np.frombuffer(raw, dtype=np.uint8).reshape(-1, 3)
-        i32 = (raw_u8[:, 0].astype(np.int32) |
-               (raw_u8[:, 1].astype(np.int32) << 8) |
-               (raw_u8[:, 2].astype(np.int32) << 16))
-        i32[i32 >= (1 << 23)] -= (1 << 24)   # sign-extend
-        s = i32.astype(np.float32) / (1 << 23)
-    elif sw == 4:                       # 32-bit signed LE
-        s = np.frombuffer(raw, dtype="<i4").astype(np.float32) / 2**31
-    else:
-        raise ValueError(f"Unsupported WAV sample width: {sw} bytes")
-
-    if n_ch > 1:
-        s = s.reshape(-1, n_ch)
-    return s, fs
 
 
 def _clean_name(name: str) -> str:

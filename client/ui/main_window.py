@@ -18,7 +18,6 @@ Ctrl+1…0       → Read last 10 messages aloud (requires accessible_output2)
 import os
 import datetime
 import wx
-import wx.adv
 import structlog
 from concurrent.futures import ThreadPoolExecutor
 
@@ -49,6 +48,7 @@ from .views import build_contact_view, build_message_view, build_call_view
 from .controllers.contacts import ContactsController
 from .controllers.messages import MessagesController
 from .controllers.calls    import CallsController
+from ..audio.sounds import SoundPlayer
 
 logger = structlog.get_logger()
 
@@ -88,9 +88,9 @@ class MainWindow(wx.Frame):
             self.udp_client,
             user_data["user_id"],
         )
-        self.notifications = DesktopNotificationService(self)
-        self.is_calling   = False
-        self.looping_sound = None
+        self.notifications  = DesktopNotificationService(self)
+        self._sound_player  = SoundPlayer()
+        self.is_calling     = False
         self._call_minimized = False
         self._call_start_time: datetime.datetime | None = None
         self._call_peer_id: str | None = None
@@ -348,17 +348,10 @@ class MainWindow(wx.Frame):
 
     def play_sound(self, filename: str, loop: bool = False):
         path = os.path.join("assets", "sounds", filename)
-        if not os.path.exists(path): return None
-        sound = wx.adv.Sound(path)
-        if not sound.IsOk(): return None
-        flags = wx.adv.SOUND_ASYNC | (wx.adv.SOUND_LOOP if loop else 0)
-        sound.Play(flags)
-        if loop: self.looping_sound = sound
-        return sound
+        self._sound_player.play(path, loop)
 
     def stop_looping_sound(self):
-        wx.adv.Sound.Stop()
-        self.looping_sound = None
+        self._sound_player.stop()
         self._ring_timer.Stop()
 
     def _on_ring_timer(self, event):

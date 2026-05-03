@@ -5,7 +5,8 @@ import sys
 import structlog
 import numpy as np
 
-# Patch ctypes so opuslib can find libopus.dll on Windows (same fix as audio/engine.py)
+# On Windows, patch ctypes so opuslib finds the bundled libopus.dll.
+# On Linux/macOS, opuslib discovers the system library automatically.
 if sys.platform == "win32":
     _lib_dir = os.path.abspath(
         os.path.join(os.path.dirname(__file__), "..", "..", "lib")

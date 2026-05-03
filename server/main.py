@@ -460,6 +460,13 @@ async def download_file(file_id: str, current_user: User = Depends(get_current_u
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(file_path)
 
+# --- Ping ---
+
+@app.get("/ping")
+async def ping():
+    """Lightweight latency probe — no auth required."""
+    return {"pong": True}
+
 # --- WebSocket Gateway ---
 
 @app.post("/ws/ticket")

@@ -74,7 +74,12 @@ class MessagesController:
             try:
                 dt = datetime.datetime.fromisoformat(
                     str(ts_raw).replace("Z", "+00:00")
-                ).astimezone()
+                )
+                # SQLite stores utcnow() as a naive string — attach UTC so
+                # .astimezone() converts correctly to the user's local time.
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=datetime.timezone.utc)
+                dt = dt.astimezone()
             except Exception:
                 dt = None
             ts_str = _ts_full(dt)

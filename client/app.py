@@ -7,7 +7,7 @@ from .services.auth import AuthService
 
 logger = structlog.get_logger()
 
-_SERVER_URL = os.environ.get("SKYPE_SERVER_URL", "http://127.0.0.1:8000")
+_SERVER_URL = os.environ.get("SKYPE_SERVER_URL", "http://random-gaming.com:9433")
 
 
 class SkypeRebornApp:

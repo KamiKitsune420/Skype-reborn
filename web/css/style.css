@@ -272,3 +272,51 @@ input, textarea { font-family: inherit; font-size: inherit; }
   .sidebar.open { display: flex; }
   .chat-area { width: 100%; }
 }
+
+/* ── Call modals / overlays ─────────────────────────────────────── */
+.call-modal,
+.call-overlay {
+  position: fixed; inset: 0; z-index: 300;
+  background: rgba(0, 0, 0, .65);
+  backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+}
+
+.call-card {
+  background: #1a1a2e; color: #fff;
+  border-radius: 20px; padding: 2.5rem 2rem;
+  width: 320px; text-align: center;
+  box-shadow: 0 30px 80px rgba(0,0,0,.6);
+  display: flex; flex-direction: column; align-items: center; gap: .7rem;
+  animation: popIn .25s cubic-bezier(.34,1.56,.64,1);
+}
+@keyframes popIn {
+  from { opacity: 0; transform: scale(.85); }
+  to   { opacity: 1; transform: scale(1);   }
+}
+
+.call-avatar-lg {
+  width: 80px; height: 80px; border-radius: 50%;
+  background: var(--accent); font-size: 2rem; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  text-transform: uppercase; margin-bottom: .3rem;
+  box-shadow: 0 0 0 6px rgba(0,120,212,.3);
+}
+
+.call-peer-name { font-size: 1.3rem; font-weight: 700; }
+.call-sub       { font-size: .85rem; color: #a0b4cc; }
+.call-timer     { font-size: 1rem; color: #5dd45d; font-variant-numeric: tabular-nums; min-height: 1.4em; }
+
+.call-btn-row { display: flex; gap: 1rem; margin-top: .7rem; }
+
+.call-btn {
+  flex: 1; padding: .75rem 1rem; border-radius: 50px;
+  font-size: .9rem; font-weight: 600; transition: filter .15s;
+}
+.call-btn:hover { filter: brightness(1.15); }
+
+.call-btn.answer  { background: #107c10; color: #fff; }
+.call-btn.decline { background: var(--danger); color: #fff; }
+.call-btn.hangup  { background: var(--danger); color: #fff; }
+.call-btn.mute    { background: #2d4a6b; color: #fff; }
+.call-btn.mute.muted { background: #555; }

@@ -1,19 +1,20 @@
-import { api, setToken }                          from './api.js';
+import { api, setToken }                              from './api.js';
 import { on as wsOn, send as wsSend, connect as wsConnect } from './ws.js';
 import { login, register, logout, restoreSession,
-         userId, username }                        from './auth.js';
+         userId, username }                          from './auth.js';
 import { loadContacts, renderContacts, contacts,
          onContactSelect, incrementUnread,
          clearUnread, touchLastMessage,
-         updateStatus }                            from './contacts.js';
+         updateStatus }                              from './contacts.js';
 import { openConversation, appendMessage,
          applyReaction, markDelivered, markRead,
          showTyping, sendMessage, cancelReply,
-         activePeerId }                            from './messages.js';
+         activePeerId }                              from './messages.js';
 import { showApp, showLogin, showChat,
          setMyProfile, setStatus, setChatHeader,
          setAuthStatus, toast, browserNotify,
-         requestNotificationPermission }           from './ui.js';
+         requestNotificationPermission }             from './ui.js';
+import * as calls                                    from './calls.js';
 
 // ── Boot ──────────────────────────────────────────────────────────
 async function boot() {
@@ -164,10 +165,68 @@ function _handleTyping() {
     }, 3000);
 }
 
-// ── Call button (placeholder) ─────────────────────────────────────
-document.getElementById('callBtn').addEventListener('click', () => {
-    toast('Web calling coming soon. Use the desktop client to call.');
+// ── Call button ───────────────────────────────────────────────────
+document.getElementById('callBtn').addEventListener('click', async () => {
+    if (!activePeerId) return;
+    if (calls.isInCall()) { toast('You are already in a call.'); return; }
+    const peer = contacts.find(c => c.id === activePeerId);
+    _showActiveCall(peer?.display_name || 'Contact', 'Calling…');
+    await calls.startCall(activePeerId);
 });
+
+document.getElementById('answerBtn').addEventListener('click', async () => {
+    document.getElementById('incomingCallModal').classList.add('hidden');
+    const name = document.getElementById('incomingName').textContent;
+    _showActiveCall(name, 'Connecting…');
+    await calls.answerCall();
+});
+
+document.getElementById('declineBtn').addEventListener('click', () => {
+    document.getElementById('incomingCallModal').classList.add('hidden');
+    calls.declineCall();
+});
+
+document.getElementById('hangupBtn').addEventListener('click', () => {
+    calls.hangUp();
+});
+
+document.getElementById('muteBtn').addEventListener('click', function() {
+    const muted = calls.toggleMute();
+    this.textContent = muted ? '🔇 Unmute' : '🎤 Mute';
+    this.classList.toggle('muted', muted);
+});
+
+// ── Call state machine ────────────────────────────────────────────
+calls.onCallState(state => {
+    const overlay  = document.getElementById('activeCallOverlay');
+    const statusEl = document.getElementById('activeCallStatus');
+    const timerEl  = document.getElementById('callTimer');
+
+    if (state === 'idle') {
+        overlay.classList.add('hidden');
+        document.getElementById('incomingCallModal').classList.add('hidden');
+        timerEl.textContent = '';
+        document.getElementById('muteBtn').textContent = '🎤 Mute';
+        document.getElementById('muteBtn').classList.remove('muted');
+    } else if (state === 'calling') {
+        if (statusEl) statusEl.textContent = 'Calling…';
+    } else if (state === 'ringing') {
+        if (statusEl) statusEl.textContent = 'Ringing…';
+    } else if (state === 'connected') {
+        if (statusEl) statusEl.textContent = 'In call';
+        if (timerEl)  timerEl.textContent  = calls.callDuration();
+    }
+});
+
+function _showActiveCall(peerName, statusText) {
+    const av  = document.getElementById('activeCallAvatar');
+    const nm  = document.getElementById('activeCallName');
+    const st  = document.getElementById('activeCallStatus');
+    if (av) av.textContent = (peerName || '?')[0].toUpperCase();
+    if (nm) nm.textContent = peerName || '—';
+    if (st) st.textContent = statusText;
+    document.getElementById('activeCallOverlay').classList.remove('hidden');
+}
 
 // ── WebSocket event handling ──────────────────────────────────────
 function _bindWS() {
@@ -216,8 +275,56 @@ function _bindWS() {
         updateStatus(payload.user_id, payload.status);
     });
 
+    // ── Call signalling ───────────────────────────────────────────
+    wsOn('CALL_INITIATE', payload => {
+        if (calls.isInCall()) {
+            // Already busy — reject immediately
+            wsSend({ type: 'CALL_REJECT',
+                     payload: { session_id: payload.session_id,
+                                target_id: payload.sender_id, sender_id: userId } });
+            return;
+        }
+        const accepted = calls.handleIncoming(payload);
+        if (!accepted) {
+            toast('Desktop call received — not supported in the web client.');
+            return;
+        }
+        // Show incoming call UI
+        const peer = contacts.find(c => c.id === payload.sender_id);
+        const name = peer?.display_name || 'Someone';
+        const av   = document.getElementById('incomingAvatar');
+        const nm   = document.getElementById('incomingName');
+        if (av) av.textContent = name[0].toUpperCase();
+        if (nm) nm.textContent = name;
+        document.getElementById('incomingCallModal').classList.remove('hidden');
+        browserNotify('Skype Reborn — Incoming Call', `${name} is calling you`);
+    });
+
+    wsOn('CALL_ACCEPT', async payload => {
+        await calls.remoteAccepted(payload);
+        const name = document.getElementById('activeCallName')?.textContent || '—';
+        _showActiveCall(name, 'In call');
+    });
+
+    wsOn('CALL_REJECT', () => {
+        calls.hangUp();
+        toast('Call declined.');
+    });
+
+    wsOn('CALL_HANGUP', () => {
+        calls.hangUp();
+        toast('Call ended.');
+    });
+
+    wsOn('CALL_CANDIDATE', async payload => {
+        await calls.addCandidate(payload);
+    });
+
     wsOn('_connected',    () => toast('Connected'));
-    wsOn('_disconnected', () => toast('Disconnected — reconnecting…'));
+    wsOn('_disconnected', () => {
+        if (calls.isInCall()) calls.hangUp();
+        toast('Disconnected — reconnecting…');
+    });
 }
 
 // ── Start ─────────────────────────────────────────────────────────

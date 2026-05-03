@@ -118,6 +118,36 @@
   </main>
 </div>
 
+<!-- ── Incoming call modal ────────────────────────────────────────── -->
+<div id="incomingCallModal" class="call-modal hidden" role="dialog" aria-modal="true" aria-label="Incoming call">
+  <div class="call-card incoming">
+    <div class="call-avatar-lg" id="incomingAvatar">?</div>
+    <div class="call-peer-name" id="incomingName">Someone</div>
+    <div class="call-sub">Incoming voice call…</div>
+    <div class="call-btn-row">
+      <button id="answerBtn"  class="call-btn answer"  aria-label="Answer">Answer</button>
+      <button id="declineBtn" class="call-btn decline" aria-label="Decline">Decline</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Active / outgoing call overlay ───────────────────────────── -->
+<div id="activeCallOverlay" class="call-overlay hidden" role="dialog" aria-modal="true" aria-label="Active call">
+  <div class="call-card active">
+    <div class="call-avatar-lg" id="activeCallAvatar">?</div>
+    <div class="call-peer-name" id="activeCallName">—</div>
+    <div class="call-sub"      id="activeCallStatus">Calling…</div>
+    <div class="call-timer"    id="callTimer"></div>
+    <div class="call-btn-row">
+      <button id="muteBtn"   class="call-btn mute"   aria-label="Toggle mute">🎤 Mute</button>
+      <button id="hangupBtn" class="call-btn hangup"  aria-label="End call">End Call</button>
+    </div>
+  </div>
+</div>
+
+<!-- Remote audio (WebRTC) -->
+<audio id="remoteAudio" autoplay aria-hidden="true"></audio>
+
 <!-- Toast container -->
 <div id="toastContainer" class="toast-container" aria-live="assertive"></div>
 

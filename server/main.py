@@ -8,6 +8,7 @@ from typing import List, Dict, Any
 from fastapi import FastAPI, Depends, HTTPException, WebSocket, WebSocketDisconnect, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
 from uuid import uuid4
@@ -226,6 +227,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve the web client at /web  (e.g. http://random-gaming.com:9433/web/)
+_web_dir = os.path.join(os.path.dirname(__file__), "..", "web")
+if os.path.isdir(_web_dir):
+    app.mount("/web", StaticFiles(directory=_web_dir, html=True), name="web")
 
 # --- Auth Routes ---
 

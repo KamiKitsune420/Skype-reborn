@@ -12,6 +12,19 @@ except Exception:
     AO2_AVAILABLE = False
 
 
+_REACTION_TEXT: dict[str, str] = {
+    "👍": "thumbed this",
+    "🤣": "laughed at this",
+    "😂": "laughed at this",
+    "❤️": "loved this",
+    "😮": "was wowed by this",
+    "😢": "cried at this",
+    "😡": "disliked this",
+    "🔥": "found this fire",
+    "🎉": "celebrated this",
+    "😊": "liked this",
+}
+
 _REACTIONS = [
     ("👍 Thumbs Up", "👍"),
     ("🤣 Rolling on the Floor Laughing", "🤣"),
@@ -32,6 +45,45 @@ def _ts_full(dt: datetime.datetime | None) -> str:
     return dt.strftime("%A, %B %d, %Y at %I:%M %p").replace(" 0", " ")
 
 
+def _last_seen_str(raw: str | None) -> str:
+    """Format a last_seen ISO timestamp as 'Xs/Xm/Xh/Xd/Xy ago'."""
+    if not raw:
+        return "unknown"
+    try:
+        dt = datetime.datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        diff = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds()
+        if diff < 60:
+            return f"{int(diff)}s ago"
+        elif diff < 3600:
+            return f"{int(diff / 60)}m ago"
+        elif diff < 86400:
+            return f"{int(diff / 3600)}h ago"
+        elif diff < 31_536_000:
+            return f"{int(diff / 86400)}d ago"
+        else:
+            return f"{int(diff / 31_536_000)}y ago"
+    except Exception:
+        return "unknown"
+
+
+def _parse_reply(content: str):
+    """If content is a reply, return (orig_sender, orig_content, reply_text). Else None."""
+    if not content.startswith("[Reply to "):
+        return None
+    try:
+        end = content.index("]", 10)
+        header = content[10:end]
+        rest = content[end + 2:]   # skip "]\n"
+        if ": " in header:
+            sender, quoted = header.split(": ", 1)
+            return sender, quoted, rest
+    except Exception:
+        pass
+    return None
+
+
 class MessagesController:
     def __init__(self, owner):
         self.owner = owner
@@ -43,14 +95,29 @@ class MessagesController:
         owner.current_conversation_id = contact["id"]
         owner.selected_contact = contact
         owner.msg_header.SetLabel(f"Conversation with {contact['display_name']}")
+        # Update view-profile button label
+        status = contact.get("status", "")
+        if status == "ONLINE":
+            seen = "Online"
+        else:
+            seen = f"Last seen {_last_seen_str(contact.get('last_seen'))}"
+        owner.view_profile_btn.SetLabel(
+            f"View {contact.get('username', contact['display_name'])}'s Profile — {seen}"
+        )
         owner._show_view(owner.VIEW_MESSAGES)
+        owner.send_btn.Enable(False)
+        self.cancel_reply()
+        # Clear unread count for this contact and update title + list
+        owner._unread_counts.pop(contact["id"], None)
+        owner._update_title()
+        owner.contacts_controller.update_list()
+        limit = owner.settings.message_history_limit
         owner._load_seq += 1
-        owner._pool.submit(self._bg_load_messages, contact["id"], owner._load_seq)
-        # Tell the peer we've read their messages
+        owner._pool.submit(self._bg_load_messages, contact["id"], owner._load_seq, limit)
         owner.session_service.send_read_receipt(contact["id"])
 
-    def _bg_load_messages(self, conv_id: str, seq: int):
-        messages = self.owner.data_service.get_messages(conv_id)
+    def _bg_load_messages(self, conv_id: str, seq: int, limit: int = 50):
+        messages = self.owner.data_service.get_messages(conv_id, limit=limit)
         wx.CallAfter(self._on_messages_loaded, seq, messages)
 
     def _on_messages_loaded(self, seq: int, messages):
@@ -84,40 +151,67 @@ class MessagesController:
                 dt = None
             ts_str = _ts_full(dt)
             entry = {
-                "sender": sender,
-                "content": message["content"],
-                "dt": dt,
-                "is_mine": is_mine,
-                "msg_id": message.get("id", ""),
+                "sender":    sender,
+                "content":   message["content"],
+                "dt":        dt,
+                "is_mine":   is_mine,
+                "msg_id":    message.get("id", ""),
+                "delivered": bool(is_mine and message.get("delivered_at")),
+                "read":      bool(is_mine and message.get("read_at")),
             }
             owner._message_items.append(entry)
             owner.message_list.Append(
-                f"{sender}: {message['content']}  {verb} on {ts_str}"
+                self._item_text(entry)
             )
         pending = owner._pending_call_records.pop(owner.current_conversation_id, [])
         for entry in pending:
             self.append_item(entry)
 
     def _item_text(self, entry: dict) -> str:
-        sender = entry["sender"]
-        verb   = "sent" if entry["is_mine"] else "received"
-        ts     = _ts_full(entry["dt"])
-        read   = "  ✓ Read" if entry.get("read") else ""
-        return f"{sender}: {entry['content']}  {verb} on {ts}{read}"
+        sender  = entry["sender"]
+        verb    = "sent" if entry["is_mine"] else "received"
+        ts      = _ts_full(entry["dt"])
+        content = entry["content"]
+        reply   = _parse_reply(content)
+        display = (
+            f"(↩ Replying to {reply[0]}) {reply[2]}" if reply else content
+        )
+        # Delivery / read receipt indicator (only on sent messages)
+        if entry.get("is_mine"):
+            if entry.get("read"):
+                receipt = "  ✓✓ Read"
+            elif entry.get("delivered"):
+                receipt = "  ✓✓"
+            else:
+                receipt = "  ✓"
+        else:
+            receipt = ""
+        reactions = entry.get("reactions", "")
+        return f"{sender}: {display}  {verb} on {ts}{receipt}{reactions}"
 
-    def append_item(self, entry: dict):
+    def append_item(self, entry: dict, scroll: bool = True):
         owner = self.owner
         entry.setdefault("read", False)
         owner._message_items.append(entry)
         owner.message_list.Append(self._item_text(entry))
-        owner.message_list.SetSelection(owner.message_list.GetCount() - 1)
+        if scroll:
+            owner.message_list.SetSelection(owner.message_list.GetCount() - 1)
+
+    def mark_conversation_delivered(self):
+        """Advance sent messages to ✓✓ (delivered)."""
+        owner = self.owner
+        for idx, item in enumerate(owner._message_items):
+            if item.get("is_mine") and not item.get("delivered") and not item.get("read"):
+                item["delivered"] = True
+                owner.message_list.SetString(idx, self._item_text(item))
 
     def mark_conversation_read(self):
-        """Mark all sent messages in the current conversation as read and refresh their display."""
+        """Advance sent messages to ✓✓ Read."""
         owner = self.owner
         for idx, item in enumerate(owner._message_items):
             if item.get("is_mine") and not item.get("read"):
-                item["read"] = True
+                item["read"]      = True
+                item["delivered"] = True
                 owner.message_list.SetString(idx, self._item_text(item))
 
     def append_call_record(
@@ -177,7 +271,7 @@ class MessagesController:
         react_sub = wx.Menu()
         for label, emoji in _REACTIONS:
             item = react_sub.Append(wx.ID_ANY, label)
-            owner.Bind(wx.EVT_MENU, lambda e, em=emoji: self.send_reaction(em), item)
+            owner.Bind(wx.EVT_MENU, lambda e, em=emoji: self.send_reaction(em, idx), item)
         custom_item = react_sub.Append(wx.ID_ANY, "Send Custom Emoji...")
         menu.AppendSubMenu(react_sub, "React")
 
@@ -198,11 +292,51 @@ class MessagesController:
 
     def reply_to(self, idx: int):
         owner = self.owner
-        if idx < len(owner._message_items):
-            entry = owner._message_items[idx]
-            quote = f"> {entry['sender']}: {entry['content']}\n"
-            owner.message_input.SetValue(quote + owner.message_input.GetValue())
-            wx.CallAfter(owner.message_input.SetFocus)
+        if idx >= len(owner._message_items):
+            return
+        entry = owner._message_items[idx]
+        owner._reply_to_entry = entry
+        preview = entry["content"][:80] + ("…" if len(entry["content"]) > 80 else "")
+        owner.reply_lbl.SetLabel(
+            f"↩ Replying to a message from {entry['sender']}: \"{preview}\""
+        )
+        owner.reply_bar.Show()
+        owner.reply_bar.GetParent().Layout()
+        wx.CallAfter(owner.message_input.SetFocus)
+
+    def cancel_reply(self, event=None):
+        owner = self.owner
+        owner._reply_to_entry = None
+        if hasattr(owner, "reply_bar"):
+            owner.reply_bar.Hide()
+            owner.reply_bar.GetParent().Layout()
+
+    def view_contact_profile(self, event=None):
+        owner = self.owner
+        contact = owner.selected_contact
+        if not contact:
+            return
+        status = contact.get("status", "OFFLINE").capitalize()
+        seen   = (
+            "Currently online"
+            if contact.get("status") == "ONLINE"
+            else f"Last seen {_last_seen_str(contact.get('last_seen'))}"
+        )
+        mood = contact.get("mood_message", "")
+        lines = [
+            f"Name:      {contact.get('display_name', '')}",
+            f"Username:  {contact.get('username', '')}",
+            f"Status:    {status}",
+            f"           {seen}",
+        ]
+        if mood:
+            lines.append(f"Mood:      {mood}")
+        wx.MessageBox(
+            "\n".join(lines),
+            f"{contact.get('display_name', 'Contact')}'s Profile",
+            wx.OK | wx.ICON_INFORMATION,
+            owner,
+        )
 
     def copy_message(self, idx: int):
         owner = self.owner
@@ -218,9 +352,33 @@ class MessagesController:
             owner._message_items.pop(idx)
             owner.message_list.Delete(idx)
 
-    def send_reaction(self, emoji: str):
-        if self.owner.current_conversation_id:
-            self.send(None, override_content=emoji)
+    def send_reaction(self, emoji: str, idx: int = -1):
+        owner = self.owner
+        if not owner.current_conversation_id:
+            return
+        # Annotate the targeted message locally
+        if 0 <= idx < len(owner._message_items):
+            item = owner._message_items[idx]
+            verb = _REACTION_TEXT.get(emoji, f"reacted with {emoji}")
+            annotation = f"  {emoji} You {verb}"
+            item["reactions"] = item.get("reactions", "") + annotation
+            owner.message_list.SetString(idx, self._item_text(item))
+        # Send the reaction to the peer as a special message format
+        self.send(None, override_content=f"[react:{emoji}]")
+        owner.play_sound("msg_react.wav")
+
+    def apply_incoming_reaction(self, emoji: str, sender_name: str):
+        """Append a peer's reaction to the most recent message sent by the local user."""
+        owner = self.owner
+        verb = _REACTION_TEXT.get(emoji, f"reacted with {emoji}")
+        annotation = f"  {emoji} {sender_name} {verb}"
+        # Find the last message sent by the local user to annotate
+        for idx in range(len(owner._message_items) - 1, -1, -1):
+            item = owner._message_items[idx]
+            if item.get("is_mine"):
+                item["reactions"] = item.get("reactions", "") + annotation
+                owner.message_list.SetString(idx, self._item_text(item))
+                return
 
     def custom_emoji(self):
         owner = self.owner
@@ -261,18 +419,29 @@ class MessagesController:
         content = override_content or owner.message_input.GetValue().strip()
         if not content or not owner.current_conversation_id:
             return
+
+        # Wrap with reply header if the user is replying to a message
+        reply_entry = getattr(owner, "_reply_to_entry", None)
+        if reply_entry and not override_content:
+            orig = reply_entry["content"][:120]
+            content = f"[Reply to {reply_entry['sender']}: {orig}]\n{content}"
+            self.cancel_reply()
+
         owner.session_service.send_message(owner.current_conversation_id, content)
+        owner._last_message_times[owner.current_conversation_id] = datetime.datetime.now()
         if not override_content:
             owner.message_input.Clear()
+            owner.send_btn.Enable(False)
         entry = {
             "sender": "You",
             "content": content,
             "dt": datetime.datetime.now(),
             "is_mine": True,
             "msg_id": "",
+            "delivered": False,
             "read": False,
         }
-        self.append_item(entry)
+        self.append_item(entry, scroll=True)
         owner.play_sound("im_sendmsg.wav")
 
     def send_file(self, event):
@@ -317,6 +486,9 @@ class MessagesController:
 
     def on_typing(self, event):
         owner = self.owner
+        # Keep Send button in sync with whether the input has content
+        has_text = bool(owner.message_input.GetValue().strip())
+        owner.send_btn.Enable(has_text)
         if not owner.current_conversation_id:
             return
         if not owner._is_typing:

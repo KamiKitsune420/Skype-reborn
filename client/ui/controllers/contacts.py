@@ -1,3 +1,4 @@
+import datetime
 import wx
 
 
@@ -25,13 +26,31 @@ class ContactsController:
                 else "CONTACTS"
             )
             owner.list_label.SetLabel(mode_label)
-            owner.contacts.sort(key=lambda c: (c["status"] != "ONLINE", c["display_name"]))
+            counts = owner._unread_counts
+            times  = owner._last_message_times
+            _epoch = datetime.datetime.min
+            if owner._contact_mode == "recents":
+                # Most recently messaged contact at the top
+                owner.contacts.sort(
+                    key=lambda c: times.get(c["id"], _epoch),
+                    reverse=True,
+                )
+            else:
+                # Contacts: unread first, then online, then A-Z
+                owner.contacts.sort(key=lambda c: (
+                    -counts.get(c["id"], 0),
+                    c["status"] != "ONLINE",
+                    c["display_name"],
+                ))
             items = []
             for contact in owner.contacts:
-                mood = contact.get("mood_message", "")
-                tag  = "  [Bot]" if contact.get("is_bot") else ""
+                mood   = contact.get("mood_message", "")
+                tag    = "  [Bot]" if contact.get("is_bot") else ""
+                unread = counts.get(contact["id"], 0)
+                prefix = f"{unread} unread, " if unread else ""
                 items.append(
-                    f"{contact['display_name']}{tag}, {contact['status'].title()}{', ' + mood if mood else ''}"
+                    f"{prefix}{contact['display_name']}{tag}, "
+                    f"{contact['status'].title()}{', ' + mood if mood else ''}"
                 )
             if not items:
                 items = ["No contacts yet. Use Find People to add contacts."]

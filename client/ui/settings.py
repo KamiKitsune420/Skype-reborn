@@ -133,6 +133,17 @@ class SettingsDialog(wx.Dialog):
         rt_row.Add(self.preview_btn, 0)
         ap.Add(rt_row, 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
 
+        ap.Add(wx.StaticLine(audio_pg), 0, wx.EXPAND | wx.LEFT | wx.RIGHT | wx.TOP, 16)
+        ap.Add(wx.StaticText(audio_pg, label="Messages loaded per conversation:"), 0, wx.LEFT | wx.TOP, 16)
+        hist_row = wx.BoxSizer(wx.HORIZONTAL)
+        self.history_spin = wx.SpinCtrl(
+            audio_pg, min=20, max=500, initial=self.settings.message_history_limit,
+            name="Message History Limit",
+        )
+        hist_row.Add(self.history_spin, 0)
+        hist_row.Add(wx.StaticText(audio_pg, label="  (20 – 500)"), 0, wx.ALIGN_CENTER_VERTICAL)
+        ap.Add(hist_row, 0, wx.LEFT | wx.TOP | wx.BOTTOM, 16)
+
         audio_pg.SetSizer(ap)
         book.AddPage(audio_pg, "Audio")
 
@@ -276,6 +287,7 @@ class SettingsDialog(wx.Dialog):
             input_device=self.input_choice.GetStringSelection(),
             output_device=self.output_choice.GetStringSelection(),
             camera_device=self.camera_choice.GetStringSelection(),
+            message_history_limit=self.history_spin.GetValue(),
         )
         self.on_save(new_settings)
         self.EndModal(wx.ID_OK)

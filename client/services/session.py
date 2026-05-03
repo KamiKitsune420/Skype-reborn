@@ -72,8 +72,9 @@ class CallHungUp:
 
 @dataclass(frozen=True)
 class MessageRead:
-    reader_id: str   # the person who read
-    peer_id: str     # whose messages they read (= our user_id when we receive this)
+    reader_id: str         # the person who acknowledged
+    peer_id: str           # whose messages they acknowledged
+    status: str = "read"   # "delivered" | "read"
 
 @dataclass(frozen=True)
 class SessionDisconnected:
@@ -189,7 +190,11 @@ class ClientSessionService:
                 self._emit(CallHungUp(CallSignalPayload(**envelope.payload)))
             elif envelope.type == MessageType.CHAT_ACK:
                 ack = ChatAckPayload(**envelope.payload)
-                self._emit(MessageRead(reader_id=ack.reader_id, peer_id=ack.peer_id))
+                self._emit(MessageRead(
+                    reader_id=ack.reader_id,
+                    peer_id=ack.peer_id,
+                    status=ack.status,
+                ))
         except Exception as exc:
             logger.error(
                 "Client session failed to process envelope",

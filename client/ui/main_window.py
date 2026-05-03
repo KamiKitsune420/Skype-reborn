@@ -50,8 +50,10 @@ from .controllers.contacts import ContactsController
 from .controllers.messages import MessagesController
 from .controllers.calls    import CallsController
 from ..audio.sounds import SoundPlayer
+from ..services.settings_store import load_settings, save_settings, _SETTINGS_FILE
 
 logger = structlog.get_logger()
+
 
 class MainWindow(wx.Frame):
     VIEW_CONTACTS = 0
@@ -70,7 +72,7 @@ class MainWindow(wx.Frame):
         self.data_service = ClientDataService(api_client)
         self.ws_client  = ws_client
         self.user_data  = user_data
-        self.settings   = SettingsPayload()
+        self.settings   = load_settings()
 
         self.contacts:        list      = []
         self.search_results:  list      = []
@@ -89,10 +91,13 @@ class MainWindow(wx.Frame):
             self.udp_client,
             user_data["user_id"],
         )
-        self.notifications  = DesktopNotificationService(self)
-        self._sound_player  = SoundPlayer()
-        self.is_calling     = False
+        self.notifications   = DesktopNotificationService(self)
+        self._sound_player   = SoundPlayer()
+        self.is_calling      = False
         self._call_minimized = False
+        self._reply_to_entry      = None
+        self._unread_counts: dict = {}        # peer_id → unread count
+        self._last_message_times: dict = {}   # peer_id → datetime of last message
         self._call_start_time: datetime.datetime | None = None
         self._call_peer_id: str | None = None
         self._call_peer_name: str = "Contact"
@@ -279,6 +284,14 @@ class MainWindow(wx.Frame):
             self.search_ctrl.Clear(); self.is_searching = False
         self.contacts_controller.update_list()
         wx.CallAfter(self.contact_list.SetFocus)
+        # Announce the active tab so the switch is not silent
+        label = "Recent Conversations" if mode == "recents" else "Contacts"
+        self.SetStatusText(label)
+        try:
+            from accessible_output2.outputs.auto import Auto as _AO2
+            _AO2().speak(label, interrupt=True)
+        except Exception:
+            pass
 
     def _on_minimize_call(self, event):
         self._call_minimized = True
@@ -292,13 +305,29 @@ class MainWindow(wx.Frame):
         self._alive = False
         self._call_timer.Stop()
         self._presence_timer.Stop()
+        self._ring_timer.Stop()
         if self._typing_timer:
             self._typing_timer.Stop()
-        self._pool.shutdown(wait=False)
         self.call_service.end_local()
         self.ws_client.close()
         self.data_service.close()
+        self._pool.shutdown(wait=False)
+        # Play sign-out sound synchronously so it finishes before the process exits
+        self._play_exit_sound()
         self.Destroy()
+
+    def _play_exit_sound(self):
+        path = os.path.join("assets", "sounds", "misk_signout.wav")
+        if not os.path.exists(path):
+            return
+        try:
+            import sounddevice as sd
+            from ..audio.sounds import read_wav_float
+            data, fs = read_wav_float(path)
+            sd.play(data, fs)
+            sd.wait()
+        except Exception:
+            pass
 
     # ═══════════════════════════════════════════════════════════════════
     # CONTACTS
@@ -339,11 +368,19 @@ class MainWindow(wx.Frame):
         dlg = FindPeopleDialog(self, do_search, do_add)
         dlg.ShowModal(); dlg.Destroy()
 
+    def _update_title(self):
+        """Reflect total unread count in the window title bar."""
+        total    = sum(self._unread_counts.values())
+        username = self.user_data.get("username", "User")
+        base     = f"Skype™ Reborn — {username}"
+        self.SetTitle(f"({total}) {base}" if total else base)
+
     def OnSettings(self, event):
-        def save_settings(new_settings):
+        def on_save(new_settings):
             self.settings = new_settings
-            self.SetStatusText("Settings saved")
-        dlg = SettingsDialog(self, self.settings, save_settings)
+            save_settings(new_settings)
+            self.SetStatusText(f"Settings saved to {_SETTINGS_FILE}")
+        dlg = SettingsDialog(self, self.settings, on_save)
         dlg.ShowModal(); dlg.Destroy()
 
     # ═══════════════════════════════════════════════════════════════════
@@ -374,18 +411,37 @@ class MainWindow(wx.Frame):
     def _on_chat_received(self, event: ChatReceived):
         if not self._alive: return
         sender_name = self._contact_name(event.sender_id)
-        entry = {
-            "sender": sender_name, "content": event.content,
-            "dt": datetime.datetime.now(), "is_mine": False, "msg_id": "",
-        }
+        self._last_message_times[event.sender_id] = datetime.datetime.now()
+
         is_open_conversation = (
             self._current_view == self.VIEW_MESSAGES
             and self.current_conversation_id == event.sender_id
         )
+
+        # Reaction messages are handled separately — they annotate an existing item
+        if event.content.startswith("[react:") and event.content.endswith("]"):
+            emoji = event.content[7:-1]
+            if is_open_conversation:
+                self.messages_controller.apply_incoming_reaction(emoji, sender_name)
+            self.play_sound("msg_react.wav")
+            if not is_open_conversation or self.IsIconized() or not self.IsActive():
+                self.notifications.notify_reaction(sender_name, emoji)
+            return
+
+        entry = {
+            "sender": sender_name, "content": event.content,
+            "dt": datetime.datetime.now(), "is_mine": False, "msg_id": "",
+            "delivered": False, "read": False,
+        }
         if is_open_conversation:
-            self.messages_controller.append_item(entry)
+            self.messages_controller.append_item(entry, scroll=False)
             self.session_service.send_read_receipt(event.sender_id)
-        # Always play the receive sound regardless of notification settings
+        else:
+            self._unread_counts[event.sender_id] = (
+                self._unread_counts.get(event.sender_id, 0) + 1
+            )
+            self._update_title()
+            self.contacts_controller.update_list()
         self.play_sound("im_getmessage.wav")
         should_notify = (
             not is_open_conversation
@@ -483,11 +539,14 @@ class MainWindow(wx.Frame):
 
     def _on_message_read(self, event: MessageRead):
         if not self._alive: return
-        # event.reader_id read messages in the conversation with event.peer_id (us).
-        # Update the open conversation if it's with that reader.
+        # The ACK is always about messages sent by us (peer_id == our user_id).
+        # reader_id is the contact; update the open conversation if it matches.
         if (self._current_view == self.VIEW_MESSAGES
                 and self.current_conversation_id == event.reader_id):
-            self.messages_controller.mark_conversation_read()
+            if event.status == "read":
+                self.messages_controller.mark_conversation_read()
+            elif event.status == "delivered":
+                self.messages_controller.mark_conversation_delivered()
 
     def _on_session_disconnected(self, event: SessionDisconnected):
         if not self._alive: return

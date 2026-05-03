@@ -99,26 +99,52 @@ def build_message_view(owner, book: wx.Simplebook) -> wx.Panel:
     page.SetBackgroundColour(_WHITE)
     sz = wx.BoxSizer(wx.VERTICAL)
 
+    # ── Header row: Back | View Profile | Conversation title ──────────
     hdr = wx.BoxSizer(wx.HORIZONTAL)
     owner.back_btn = wx.Button(page, label="Back to Contacts (Esc)", name="Back Button")
+    owner.view_profile_btn = wx.Button(page, label="View Profile", name="View Profile Button")
     owner.msg_header = wx.StaticText(page, label="", name="Conversation Header")
     f = owner.msg_header.GetFont()
     f.SetPointSize(11)
     f.SetWeight(wx.FONTWEIGHT_BOLD)
     owner.msg_header.SetFont(f)
     hdr.Add(owner.back_btn, 0, wx.ALL, 6)
+    hdr.Add(owner.view_profile_btn, 0, wx.TOP | wx.BOTTOM | wx.RIGHT, 6)
     hdr.Add(owner.msg_header, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
     sz.Add(hdr, 0, wx.EXPAND)
     sz.Add(wx.StaticLine(page), 0, wx.EXPAND)
 
+    # ── Message list ─────────────────────────────────────────────────
     owner.message_list = wx.ListBox(
         page, style=wx.LB_SINGLE | wx.BORDER_SIMPLE, name="Message List"
     )
     owner.message_list.SetToolTip(
         "Messages. Shift+F10 or right-click for reply, react, copy, delete."
     )
+    owner.message_list.SetAccessible(_NamedAccessible(owner.message_list, "Message List"))
     sz.Add(owner.message_list, 1, wx.EXPAND | wx.ALL, 4)
 
+    # ── Reply bar (hidden until the user hits Reply) ─────────────────
+    owner.reply_bar = wx.Panel(page)
+    owner.reply_bar.SetBackgroundColour(wx.Colour(232, 240, 254))
+    rb_sz = wx.BoxSizer(wx.HORIZONTAL)
+    owner.reply_lbl = wx.StaticText(
+        owner.reply_bar, label="", name="Reply Context"
+    )
+    rb_lf = owner.reply_lbl.GetFont()
+    rb_lf.SetPointSize(9)
+    owner.reply_lbl.SetFont(rb_lf)
+    owner.reply_lbl.SetForegroundColour(wx.Colour(0, 80, 160))
+    owner.reply_cancel_btn = wx.Button(
+        owner.reply_bar, label="✕", size=(26, 26), name="Cancel Reply"
+    )
+    rb_sz.Add(owner.reply_lbl, 1, wx.ALIGN_CENTER_VERTICAL | wx.LEFT, 8)
+    rb_sz.Add(owner.reply_cancel_btn, 0, wx.ALL, 2)
+    owner.reply_bar.SetSizer(rb_sz)
+    owner.reply_bar.Hide()
+    sz.Add(owner.reply_bar, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
+
+    # ── Input area ───────────────────────────────────────────────────
     msg_lbl = wx.StaticText(page, label="Message:", name="Message Label")
     sz.Add(msg_lbl, 0, wx.LEFT | wx.TOP, 4)
     owner.message_input = wx.TextCtrl(
@@ -132,22 +158,25 @@ def build_message_view(owner, book: wx.Simplebook) -> wx.Panel:
     sz.Add(owner.message_input, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 4)
 
     btn_row = wx.BoxSizer(wx.HORIZONTAL)
-    owner.voice_btn = wx.Button(page, label="Voice Message", name="Voice Message")
-    owner.emoji_btn = wx.Button(page, label="Send Emoticon", name="Send Emoticon")
-    owner.attach_btn = wx.Button(page, label="Add Attachment", name="Add Attachment")
-    owner.send_btn = wx.Button(page, label="Send", name="Send")
+    owner.voice_btn  = wx.Button(page, label="Voice Message",   name="Voice Message")
+    owner.emoji_btn  = wx.Button(page, label="Send Emoticon",   name="Send Emoticon")
+    owner.attach_btn = wx.Button(page, label="Add Attachment",  name="Add Attachment")
+    owner.send_btn   = wx.Button(page, label="Send",            name="Send")
     owner.send_btn.SetBackgroundColour(_BLUE)
     owner.send_btn.SetForegroundColour(_WHITE)
-    btn_row.Add(owner.voice_btn, 0, wx.ALL, 4)
-    btn_row.Add(owner.emoji_btn, 0, wx.ALL, 4)
+    owner.send_btn.Enable(False)   # disabled until the input has content
+    btn_row.Add(owner.voice_btn,  0, wx.ALL, 4)
+    btn_row.Add(owner.emoji_btn,  0, wx.ALL, 4)
     btn_row.Add(owner.attach_btn, 0, wx.ALL, 4)
     btn_row.AddStretchSpacer()
-    btn_row.Add(owner.send_btn, 0, wx.ALL, 4)
+    btn_row.Add(owner.send_btn,   0, wx.ALL, 4)
     sz.Add(btn_row, 0, wx.EXPAND)
 
     page.SetSizer(sz)
 
     owner.back_btn.Bind(wx.EVT_BUTTON, lambda e: owner._show_view(owner.VIEW_CONTACTS))
+    owner.view_profile_btn.Bind(wx.EVT_BUTTON, owner.messages_controller.view_contact_profile)
+    owner.reply_cancel_btn.Bind(wx.EVT_BUTTON, owner.messages_controller.cancel_reply)
     owner.send_btn.Bind(wx.EVT_BUTTON, owner.messages_controller.send)
     owner.voice_btn.Bind(wx.EVT_BUTTON, lambda e: owner._not_supported("Voice messaging"))
     owner.emoji_btn.Bind(wx.EVT_BUTTON, owner.messages_controller.on_emoji)

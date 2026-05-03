@@ -87,6 +87,9 @@ class SettingsPayload(BaseModel):
     output_device: str = "Default"
     camera_device: str = "Default"
     ringtone: str = "call_ring1.wav"
+    message_history_limit: int = 50
+    saved_username: str = ""
+    saved_password: str = ""   # stored in plaintext — consider OS keychain for production
 
 class ChatMessagePayload(BaseModel):
     conversation_id: str
@@ -112,8 +115,9 @@ class CallSignalPayload(BaseModel):
     data: Optional[Dict[str, Any]] = None
 
 class ChatAckPayload(BaseModel):
-    peer_id: str    # whose messages were read
-    reader_id: str  # who read them
+    peer_id: str              # whose messages are acknowledged
+    reader_id: str            # who acknowledged them
+    status: str = "read"     # "delivered" | "read"
 
 class ErrorPayload(BaseModel):
     code: int

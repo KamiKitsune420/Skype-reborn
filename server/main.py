@@ -296,7 +296,9 @@ async def get_contacts(current_user: User = Depends(get_current_user), db: Async
 
     return [{"id": c.id, "username": c.username, "display_name": c.display_name,
              "status": c.status, "mood_message": c.mood_message or "",
-             "is_bot": _is_bot_user(c)} for c in contacts]
+             "is_bot": _is_bot_user(c),
+             "last_seen": c.last_seen.isoformat() if c.last_seen else None,
+             } for c in contacts]
 
 @app.post("/contacts/add")
 async def add_contact(payload: ContactAddPayload, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -329,7 +331,12 @@ async def add_contact(payload: ContactAddPayload, current_user: User = Depends(g
 # --- Messaging Routes ---
 
 @app.get("/messages/{conversation_id}")
-async def get_messages(conversation_id: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+async def get_messages(
+    conversation_id: str,
+    limit: int = 50,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     peer = await _get_user_by_id_or_username(db, conversation_id)
     if not peer:
         raise HTTPException(status_code=404, detail="Conversation user not found")
@@ -344,10 +351,15 @@ async def get_messages(conversation_id: str, current_user: User = Depends(get_cu
     if not conversation:
         return []
 
-    stmt = select(DBMessage).where(DBMessage.conversation_id == conversation.id).order_by(DBMessage.timestamp.asc())
+    stmt = (
+        select(DBMessage)
+        .where(DBMessage.conversation_id == conversation.id)
+        .order_by(DBMessage.timestamp.desc())
+        .limit(max(1, min(limit, 500)))
+    )
     result = await db.execute(stmt)
-    messages = result.scalars().all()
-    return messages
+    # Return in chronological order (oldest first) so the UI appends top→bottom
+    return list(reversed(result.scalars().all()))
 
 @app.get("/users/search")
 async def search_users(query: str, current_user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -539,6 +551,18 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
                             if delivered_msg:
                                 delivered_msg.delivered_at = datetime.utcnow()
                                 await db.commit()
+                        # Notify the sender that their message was delivered
+                        delivered_ack = Envelope(
+                            type=MessageType.CHAT_ACK,
+                            payload=ChatAckPayload(
+                                peer_id=db_msg.sender_id,
+                                reader_id=db_msg.recipient_id,
+                                status="delivered",
+                            ).model_dump(),
+                        )
+                        await manager.send_personal_message(
+                            delivered_ack.model_dump_json(), db_msg.sender_id
+                        )
 
                 elif envelope.type == MessageType.PRESENCE_UPDATE:
                     presence_payload = PresenceUpdatePayload(**envelope.payload)
@@ -624,4 +648,5 @@ async def websocket_endpoint(websocket: WebSocket, ticket: str):
             user = res.scalars().first()
             if user:
                 user.status = UserStatus.OFFLINE.value
+                user.last_seen = datetime.utcnow()
                 await db.commit()

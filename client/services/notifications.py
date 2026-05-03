@@ -25,16 +25,22 @@ class DesktopNotificationService:
             play_sound()
         self.parent.RequestUserAttention(wx.USER_ATTENTION_INFO)
         if self.parent.IsIconized() or not self.parent.IsActive():
-            self._show_toast(sender_name, content)
+            self._show_toast(f"Skype Reborn — {sender_name}", content)
 
     def notify_incoming_call(self, caller_name: str):
         self.parent.RequestUserAttention(wx.USER_ATTENTION_ERROR)
         if self.parent.IsIconized() or not self.parent.IsActive():
-            self._show_toast("Incoming call", caller_name)
+            self._show_toast("Skype Reborn — Incoming Call", caller_name)
 
     def notify_presence_change(self, name: str, is_online: bool):
         msg = f"{name} is now online" if is_online else f"{name} has gone offline"
-        self._show_toast("Skype", msg)
+        self._show_toast("Skype Reborn", msg)
+
+    def notify_reaction(self, sender_name: str, preview: str):
+        self._show_toast(
+            "Skype Reborn",
+            f"{sender_name} reacted to your message: {preview}",
+        )
 
     def _show_toast(self, title: str, message: str):
         try:

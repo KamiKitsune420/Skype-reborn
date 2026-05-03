@@ -20,8 +20,8 @@ class ClientDataService:
     def add_contact(self, username: str):
         return self._api.add_contact(username)
 
-    def get_messages(self, conversation_id: str) -> list[dict[str, Any]]:
-        return self._api.get_messages(conversation_id)
+    def get_messages(self, conversation_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        return self._api.get_messages(conversation_id, limit=limit)
 
     def upload_file(self, recipient_id: str, filename: str, content: bytes):
         return self._api.upload_file(recipient_id, filename, content)

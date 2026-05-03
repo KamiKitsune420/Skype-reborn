@@ -4,6 +4,7 @@ import wx
 import structlog
 from ..services.auth import AuthService
 from ..audio.sounds import SoundPlayer
+from ..services.settings_store import load_settings, save_settings
 
 logger = structlog.get_logger()
 
@@ -37,6 +38,7 @@ class LoginFrame(wx.Frame):
         self.SetBackgroundColour(_BG)
         self._build_ui()
         self.Centre()
+        self._prefill_saved_credentials()
 
     # ── Layout ───────────────────────────────────────────────────────
 
@@ -148,6 +150,7 @@ class LoginFrame(wx.Frame):
         self.pass_ctrl.Bind(wx.EVT_TEXT_ENTER, self.OnLogin)
         self.user_ctrl.Bind(wx.EVT_TEXT_ENTER, lambda e: self.pass_ctrl.SetFocus())
         self.to_reg_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_page(1))
+        self.remember_cb.Bind(wx.EVT_CHECKBOX, self._on_remember_toggled)
 
     def _build_register_page(self):
         page = wx.Panel(self._book, name="Register Page")
@@ -195,6 +198,21 @@ class LoginFrame(wx.Frame):
         self.do_reg_btn.Bind(wx.EVT_BUTTON, self.OnRegister)
         back_btn.Bind(wx.EVT_BUTTON, lambda e: self._show_page(0))
 
+    def _prefill_saved_credentials(self):
+        s = load_settings()
+        if s.saved_username:
+            self.user_ctrl.SetValue(s.saved_username)
+            self.pass_ctrl.SetValue(s.saved_password)
+            self.remember_cb.SetValue(True)
+
+    def _on_remember_toggled(self, event):
+        """Immediately clear saved credentials when the user unchecks Remember me."""
+        if not self.remember_cb.IsChecked():
+            s = load_settings()
+            s.saved_username = ""
+            s.saved_password = ""
+            save_settings(s)
+
     def _show_page(self, idx: int):
         self.status_text.SetLabel("")
         self._book.SetSelection(idx)
@@ -221,6 +239,15 @@ class LoginFrame(wx.Frame):
         if success:
             self._set_status("Signed in!", error=False)
             SoundPlayer().play(os.path.join("assets", "sounds", "misk_signin.wav"))
+            # Save or clear credentials based on Remember Me
+            s = load_settings()
+            if self.remember_cb.IsChecked():
+                s.saved_username = self.user_ctrl.GetValue().strip()
+                s.saved_password = self.pass_ctrl.GetValue().strip()
+            else:
+                s.saved_username = ""
+                s.saved_password = ""
+            save_settings(s)
             self._on_login_success(res)
         else:
             self._set_status(f"Sign in failed: {res}", error=True)

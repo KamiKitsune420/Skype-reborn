@@ -30,6 +30,7 @@ class User(Base):
     hometown:      Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
     birthday:      Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
     avatar_path:   Mapped[Optional[str]] = mapped_column(String, nullable=True, default="")
+    last_seen:     Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 class Message(Base):
     __tablename__ = "messages"
@@ -92,6 +93,7 @@ async def init_db():
             ("hometown",     "TEXT DEFAULT ''"),
             ("birthday",     "TEXT DEFAULT ''"),
             ("avatar_path",  "TEXT DEFAULT ''"),
+            ("last_seen",    "DATETIME"),
         ]:
             try:
                 await conn.execute(text(f"ALTER TABLE users ADD COLUMN {col} {sql_type}"))

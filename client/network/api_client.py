@@ -61,9 +61,9 @@ class APIClient:
             logger.error("Failed to add contact", error=str(e))
             return False, str(e)
 
-    def get_messages(self, conversation_id: str):
+    def get_messages(self, conversation_id: str, limit: int = 50):
         try:
-            resp = self.client.get(f"/messages/{conversation_id}")
+            resp = self.client.get(f"/messages/{conversation_id}", params={"limit": limit})
             return resp.json() if resp.status_code == 200 else []
         except Exception as e:
             logger.error("Failed to get messages", error=str(e))

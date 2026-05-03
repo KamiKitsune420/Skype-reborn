@@ -134,6 +134,10 @@ class MessagesController:
         my_id = owner.user_data["user_id"]
         cname = owner.selected_contact["display_name"] if owner.selected_contact else "Contact"
         for message in messages:
+            # Skip reaction signals — they annotate other messages, not new items
+            content = message.get("content", "")
+            if content.startswith("[react:") and content.endswith("]"):
+                continue
             is_mine = message["sender_id"] == my_id
             sender = "You" if is_mine else cname
             verb = "sent" if is_mine else "received"
@@ -363,8 +367,12 @@ class MessagesController:
             annotation = f"  {emoji} You {verb}"
             item["reactions"] = item.get("reactions", "") + annotation
             owner.message_list.SetString(idx, self._item_text(item))
-        # Send the reaction to the peer as a special message format
-        self.send(None, override_content=f"[react:{emoji}]")
+        # Send the reaction signal directly — bypassing send() so it does NOT
+        # appear as a new entry in the message list.
+        owner.session_service.send_message(
+            owner.current_conversation_id, f"[react:{emoji}]"
+        )
+        owner._last_message_times[owner.current_conversation_id] = datetime.datetime.now()
         owner.play_sound("msg_react.wav")
 
     def apply_incoming_reaction(self, emoji: str, sender_name: str):

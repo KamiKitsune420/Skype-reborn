@@ -32,7 +32,15 @@ except Exception:
         def __init__(self, *args, **kwargs): pass
         def decode(self, data, frame_size): return data if data else b'\x00' * (frame_size * 2)
 
+from pathlib import Path
 from uuid import UUID
+
+# Sounds live next to the bot code, not in the client's assets folder.
+_SOUNDS_DIR = Path(__file__).parent / "sounds"
+
+def _sound(filename: str) -> str:
+    """Return the absolute path to a bot sound file."""
+    return str(_SOUNDS_DIR / filename)
 from server.bots.sdk import BotSDK
 from shared.models import Envelope, MessageType, CallSignalPayload, UserStatus
 
@@ -122,8 +130,8 @@ class EchoServiceBot:
 
         user_id = call["user_id"]
         try:
-            await self.play_wav(session_id, "assets/sounds/echo_intro.wav")
-            await self.play_wav(session_id, "assets/sounds/echo_beep.wav")
+            await self.play_wav(session_id, _sound("echo_intro.wav"))
+            await self.play_wav(session_id, _sound("echo_beep.wav"))
 
             # Record for 5 seconds while sending silent frames so the client's
             # jitter buffer keeps its sequence numbers in sync with ours.
@@ -133,7 +141,7 @@ class EchoServiceBot:
             await self._send_silence(session_id, seconds=5)
             call["is_recording"] = False
 
-            await self.play_wav(session_id, "assets/sounds/echo_beep.wav")
+            await self.play_wav(session_id, _sound("echo_beep.wav"))
 
             # Play back the recorded audio with drift compensation.
             # Decode each recorded Opus frame (from the client's encoder) and
@@ -158,8 +166,8 @@ class EchoServiceBot:
                         await asyncio.sleep(delay)
 
             # Beep signals end of playback, then play the finish sound
-            await self.play_wav(session_id, "assets/sounds/echo_beep.wav")
-            await self.play_wav(session_id, "assets/sounds/echo_outro.wav")
+            await self.play_wav(session_id, _sound("echo_beep.wav"))
+            await self.play_wav(session_id, _sound("echo_outro.wav"))
 
         except Exception as e:
             logger.error("EchoBot: error in echo sequence", session_id=session_id, error=str(e))
@@ -183,9 +191,9 @@ class EchoServiceBot:
         This keeps play_wav free of executor waits during live calls so the
         client's jitter buffer never drains at a WAV transition."""
         paths = [
-            "assets/sounds/echo_intro.wav",
-            "assets/sounds/echo_beep.wav",
-            "assets/sounds/echo_outro.wav",
+            _sound("echo_intro.wav"),
+            _sound("echo_beep.wav"),
+            _sound("echo_outro.wav"),
         ]
         loop = asyncio.get_running_loop()
         for path in paths:

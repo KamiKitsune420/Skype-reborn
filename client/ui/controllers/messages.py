@@ -2,6 +2,7 @@ import datetime
 import os
 
 import wx
+from ..contact_profile_dialog import ContactProfileDialog
 
 try:
     from accessible_output2.outputs.auto import Auto as _AO2
@@ -320,27 +321,9 @@ class MessagesController:
         contact = owner.selected_contact
         if not contact:
             return
-        status = contact.get("status", "OFFLINE").capitalize()
-        seen   = (
-            "Currently online"
-            if contact.get("status") == "ONLINE"
-            else f"Last seen {_last_seen_str(contact.get('last_seen'))}"
-        )
-        mood = contact.get("mood_message", "")
-        lines = [
-            f"Name:      {contact.get('display_name', '')}",
-            f"Username:  {contact.get('username', '')}",
-            f"Status:    {status}",
-            f"           {seen}",
-        ]
-        if mood:
-            lines.append(f"Mood:      {mood}")
-        wx.MessageBox(
-            "\n".join(lines),
-            f"{contact.get('display_name', 'Contact')}'s Profile",
-            wx.OK | wx.ICON_INFORMATION,
-            owner,
-        )
+        dlg = ContactProfileDialog(owner, contact)
+        dlg.ShowModal()
+        dlg.Destroy()
 
     def copy_message(self, idx: int):
         owner = self.owner

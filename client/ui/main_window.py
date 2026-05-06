@@ -17,7 +17,9 @@ Ctrl+1…0       → Read last 10 messages aloud (requires accessible_output2)
 
 import os
 import datetime
+from urllib.parse import urlparse
 import wx
+import wx.adv
 import structlog
 from concurrent.futures import ThreadPoolExecutor
 
@@ -45,6 +47,7 @@ from .settings            import SettingsDialog
 from .find_people         import FindPeopleDialog
 from .profile_dialog      import ProfileDialog
 from .incoming_call_dialog import IncomingCallDialog
+from .tray_icon import MainTrayIcon
 from .views import build_contact_view, build_message_view, build_call_view
 from .controllers.contacts import ContactsController
 from .controllers.messages import MessagesController
@@ -53,6 +56,22 @@ from ..audio.sounds import SoundPlayer
 from ..services.settings_store import load_settings, save_settings, _SETTINGS_FILE
 
 logger = structlog.get_logger()
+
+
+def _resolve_udp_endpoint(api_base_url: str) -> tuple[str, int]:
+    host = os.environ.get("SKYPE_UDP_HOST", "").strip()
+    if not host:
+        parsed = urlparse(
+            api_base_url if "://" in api_base_url else f"http://{api_base_url}"
+        )
+        host = parsed.hostname or "127.0.0.1"
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    try:
+        port = int(os.environ.get("SKYPE_UDP_PORT", "9000").strip())
+    except ValueError:
+        port = 9000
+    return host, port
 
 
 class MainWindow(wx.Frame):
@@ -84,7 +103,9 @@ class MainWindow(wx.Frame):
         from ..network.udp_client import UDPClient
         self.session_service = ClientSessionService(ws_client, user_data["user_id"])
         self.audio_engine = AudioEngine()
-        self.udp_client   = UDPClient("127.0.0.1", 9000)
+        udp_host, udp_port = _resolve_udp_endpoint(api_client.base_url)
+        logger.info("Voice UDP endpoint", host=udp_host, port=udp_port)
+        self.udp_client = UDPClient(udp_host, udp_port)
         self.call_service = CallService(
             self.session_service,
             self.audio_engine,
@@ -104,6 +125,10 @@ class MainWindow(wx.Frame):
         self._call_is_incoming: bool = False
         self._mute_on_answer: bool = False
         self._pending_call_records: dict = {}
+        self._force_exit = False
+        self._is_shutting_down = False
+        self._tray_icon: MainTrayIcon | None = None
+        self._tray_hint_shown = False
 
         self._pool        = ThreadPoolExecutor(max_workers=4, thread_name_prefix="api")
         self._load_seq    = 0
@@ -124,6 +149,7 @@ class MainWindow(wx.Frame):
         self.calls_controller = CallsController(self)
 
         self._build_ui()
+        self._ensure_tray_icon()
         self.CreateMenus()
         self.CreateStatusBar()
         self.SetStatusText("Ready")
@@ -232,7 +258,7 @@ class MainWindow(wx.Frame):
         bar.Append(help_, "&Help")
         self.SetMenuBar(bar)
 
-        self.Bind(wx.EVT_MENU, lambda e: self.Close(),                          id=wx.ID_EXIT)
+        self.Bind(wx.EVT_MENU, self.exit_application,                           id=wx.ID_EXIT)
         self.Bind(wx.EVT_MENU, self.OnSettings,                                 id=wx.ID_PREFERENCES)
         self.Bind(wx.EVT_MENU, self.OnViewProfile,                              profile_item)
         self.Bind(wx.EVT_MENU, lambda e: self._switch_contact_mode("recents"),  rec_item)
@@ -302,6 +328,21 @@ class MainWindow(wx.Frame):
     # ═══════════════════════════════════════════════════════════════════
 
     def OnClose(self, event):
+        if self._is_shutting_down:
+            if event:
+                event.Skip()
+            return
+        if self._force_exit or (event is not None and not event.CanVeto()):
+            self._shutdown_and_destroy()
+            if event:
+                event.Skip()
+            return
+        self._minimize_to_tray()
+        if event and event.CanVeto():
+            event.Veto()
+
+    def _shutdown_and_destroy(self):
+        self._is_shutting_down = True
         self._alive = False
         self._call_timer.Stop()
         self._presence_timer.Stop()
@@ -312,9 +353,59 @@ class MainWindow(wx.Frame):
         self.ws_client.close()
         self.data_service.close()
         self._pool.shutdown(wait=False)
+        if self._tray_icon:
+            try:
+                self._tray_icon.RemoveIcon()
+            except Exception:
+                pass
+            try:
+                self._tray_icon.Destroy()
+            except Exception:
+                pass
+            self._tray_icon = None
         # Play sign-out sound synchronously so it finishes before the process exits
         self._play_exit_sound()
         self.Destroy()
+
+    def _ensure_tray_icon(self):
+        if self._tray_icon is None:
+            try:
+                self._tray_icon = MainTrayIcon(self)
+            except Exception as exc:
+                logger.warning("Could not initialize tray icon", error=str(exc))
+                self._tray_icon = None
+
+    def _minimize_to_tray(self):
+        self._ensure_tray_icon()
+        if self._tray_icon is None:
+            self.Iconize(True)
+            return
+        self.Hide()
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            try:
+                note = wx.adv.NotificationMessage(
+                    title="Skype Reborn",
+                    message="Still running in the tray. Double-click the tray icon to reopen.",
+                    parent=self,
+                )
+                note.Show(timeout=4)
+            except Exception:
+                pass
+
+    def restore_from_tray(self):
+        self.Show()
+        if self.IsIconized():
+            self.Iconize(False)
+        self.Raise()
+        try:
+            self.RequestUserAttention(wx.USER_ATTENTION_INFO)
+        except Exception:
+            pass
+
+    def exit_application(self, event=None):
+        self._force_exit = True
+        self.Close()
 
     def _play_exit_sound(self):
         path = os.path.join("assets", "sounds", "misk_signout.wav")

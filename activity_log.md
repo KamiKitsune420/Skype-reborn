@@ -77,3 +77,4 @@
 | Verified main window controller split | Success | MainWindow reduced to about 411 lines; py_compile, client imports, and pytest all passed |
 | Fixed contact list accidental navigation | Success | Single selection now only selects a contact; chat opens only on double-click or Enter |
 | Fixed contact list Enter activation | Success | Added robust frame-level Return/Numpad Enter handling for focused contact list selection |
+| Hardened contact Enter path | Success | Enter now resolves the current list selection directly and no longer depends on stale selected_contact state |

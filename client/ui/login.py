@@ -267,6 +267,12 @@ class LoginFrame(wx.Frame):
             self._on_login_success(res)
         else:
             self._set_status(f"Sign in failed: {res}", error=True)
+            wx.MessageBox(
+                f"Sign in failed.\n\n{res}",
+                "Could Not Sign In",
+                wx.OK | wx.ICON_ERROR,
+                self,
+            )
             self.login_btn.Enable()
 
     # ── Register ─────────────────────────────────────────────────────

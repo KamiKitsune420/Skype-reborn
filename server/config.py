@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     SECRET_KEY: Optional[str] = Field(default_factory=_dev_secret_key)
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    VOICE_RELAY_HOST: str = "0.0.0.0"
+    VOICE_RELAY_PORT: int = 9000
     UPLOAD_DIR: str = "server/uploads"
     MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024  # 100 MB
     # Restrict CORS to known origins. Override via CORS_ORIGINS env var (JSON list).

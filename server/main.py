@@ -207,16 +207,28 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
     await ensure_bots_registered()
-    asyncio.create_task(start_voice_relay())
+    voice_transport, voice_protocol = await start_voice_relay(
+        host=settings.VOICE_RELAY_HOST,
+        port=settings.VOICE_RELAY_PORT,
+    )
     if not os.path.exists(settings.UPLOAD_DIR):
         os.makedirs(settings.UPLOAD_DIR)
-    logger.info("Database initialized and Voice Relay started")
+    logger.info(
+        "Database initialized and Voice Relay started",
+        host=settings.VOICE_RELAY_HOST,
+        port=settings.VOICE_RELAY_PORT,
+    )
 
     bot_processes = await start_bots()
 
     yield
     # Shutdown
     logger.info("Server shutting down")
+    try:
+        voice_protocol.stop()
+        voice_transport.close()
+    except Exception:
+        pass
     for proc in bot_processes:
         try:
             proc.terminate()
